@@ -12,6 +12,7 @@
 //!   * `stt-final`   — a finished utterance
 //!   * `stt-error`   — a human-readable error string
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -86,9 +87,25 @@ fn worker(app: AppHandle, models_dir: PathBuf, rx: Receiver<Cmd>, recording: Arc
             }
         }
 
-        let (recognizer, vad) = engine.as_ref().expect("engine loaded above");
-        if let Err(e) = session(&app, recognizer, vad, &recording) {
-            let _ = app.emit("stt-error", e);
+        // Run the session guarded against panics so a single failure never kills
+        // the worker thread (which would leave the UI stuck on "Finishing…").
+        let outcome = {
+            let (recognizer, vad) = engine.as_ref().expect("engine loaded above");
+            catch_unwind(AssertUnwindSafe(|| session(&app, recognizer, vad, &recording)))
+        };
+
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!("[stt] session error: {e}");
+                let _ = app.emit("stt-error", e);
+            }
+            Err(_) => {
+                eprintln!("[stt] session panicked; resetting engine");
+                // The recognizer/VAD may be in a bad state — force a reload.
+                engine = None;
+                let _ = app.emit("stt-error", "Speech engine hit an error. Try again.");
+            }
         }
 
         recording.store(false, Ordering::SeqCst);
@@ -149,11 +166,15 @@ fn session(
     let device = host
         .default_output_device()
         .ok_or("No default output device found")?;
+    let device_name = device.name().unwrap_or_else(|_| "<unknown>".into());
     let default_config = device.default_output_config().map_err(|e| e.to_string())?;
     let sample_format = default_config.sample_format();
     let config: cpal::StreamConfig = default_config.into();
     let channels = config.channels as usize;
     let device_rate = config.sample_rate.0 as i32;
+    eprintln!(
+        "[stt] loopback device='{device_name}' rate={device_rate} channels={channels} format={sample_format:?}"
+    );
 
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
     let stream = build_stream(&device, &config, sample_format, channels, tx)?;
@@ -170,65 +191,112 @@ fn session(
 
     let _ = app.emit("stt-status", "listening");
 
-    let mut buffer: Vec<f32> = Vec::new();
-    let mut offset = 0usize;
-    let mut speech_started = false;
+    // `pending` holds 16 kHz mono samples not yet chunked into 512-sample VAD
+    // windows. `utterance` accumulates the current speech run so partials can be
+    // decoded incrementally without re-decoding old, already-finalised audio.
+    let mut pending: Vec<f32> = Vec::new();
+    let mut utterance: Vec<f32> = Vec::new();
+    let mut in_speech = false;
     let mut last_partial = Instant::now();
+    let mut last_level_log = Instant::now();
+    let mut peak_level = 0.0f32;
+    let mut got_audio = false;
 
     while recording.load(Ordering::SeqCst) {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(samples) => match &resampler {
-                Some(r) => buffer.extend_from_slice(&r.resample(&samples, false)),
-                None => buffer.extend_from_slice(&samples),
-            },
+            Ok(samples) => {
+                got_audio = true;
+                match &resampler {
+                    Some(r) => pending.extend_from_slice(&r.resample(&samples, false)),
+                    None => pending.extend_from_slice(&samples),
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
         // Feed the VAD in fixed 512-sample windows.
-        while offset + WINDOW <= buffer.len() {
-            vad.accept_waveform(&buffer[offset..offset + WINDOW]);
-            if !speech_started && vad.detected() {
-                speech_started = true;
+        let mut consumed = 0usize;
+        while consumed + WINDOW <= pending.len() {
+            let window = &pending[consumed..consumed + WINDOW];
+            for &s in window {
+                let a = s.abs();
+                if a > peak_level {
+                    peak_level = a;
+                }
             }
-            offset += WINDOW;
+            vad.accept_waveform(window);
+            if vad.detected() {
+                if !in_speech {
+                    in_speech = true;
+                    utterance.clear();
+                    eprintln!("[stt] speech detected");
+                }
+            }
+            if in_speech {
+                utterance.extend_from_slice(window);
+            }
+            consumed += WINDOW;
+        }
+        if consumed > 0 {
+            pending.drain(0..consumed);
         }
 
-        // Drop stale leading silence so the buffer doesn't grow unbounded.
-        if !speech_started && buffer.len() > 10 * WINDOW {
-            buffer = buffer[buffer.len() - 10 * WINDOW..].to_vec();
-            offset = 0;
+        // Emit finished utterances the VAD has segmented out.
+        while !vad.is_empty() {
+            if let Some(segment) = vad.front() {
+                let samples = segment.samples();
+                eprintln!("[stt] final segment: {} samples", samples.len());
+                emit_decode(app, recognizer, samples, "stt-final");
+            }
+            vad.pop();
+            in_speech = false;
+            utterance.clear();
         }
 
-        // Interim transcript while the current utterance is still ongoing.
-        if speech_started && last_partial.elapsed().as_secs_f32() > 0.5 {
-            emit_decode(app, recognizer, &buffer, "stt-partial");
+        // Interim transcript for the still-ongoing utterance (bounded so a long
+        // continuous stream never turns decoding into an unbounded cost).
+        if in_speech && !utterance.is_empty() && last_partial.elapsed().as_secs_f32() > 0.4 {
+            let tail = tail_samples(&utterance, (SAMPLE_RATE as usize) * 12);
+            emit_decode(app, recognizer, tail, "stt-partial");
             last_partial = Instant::now();
         }
 
-        // Emit finished utterances detected by the VAD.
-        while !vad.is_empty() {
-            if let Some(segment) = vad.front() {
-                emit_decode(app, recognizer, segment.samples(), "stt-final");
-            }
-            vad.pop();
-            buffer.clear();
-            offset = 0;
-            speech_started = false;
+        if last_level_log.elapsed().as_secs_f32() > 2.0 {
+            eprintln!("[stt] peak level over last 2s: {peak_level:.4} (audio flowing: {got_audio})");
+            peak_level = 0.0;
+            last_level_log = Instant::now();
         }
     }
 
-    // Flush any trailing speech that was buffered when the user stopped.
+    // Flush any trailing speech buffered when the user stopped.
     vad.flush();
+    let mut flushed_final = false;
     while !vad.is_empty() {
         if let Some(segment) = vad.front() {
             emit_decode(app, recognizer, segment.samples(), "stt-final");
+            flushed_final = true;
         }
         vad.pop();
     }
+    // If the user stopped mid-sentence the VAD may not have produced a segment;
+    // decode whatever speech we accumulated so nothing is silently dropped.
+    if !flushed_final && utterance.len() > WINDOW {
+        emit_decode(app, recognizer, &utterance, "stt-final");
+    }
 
     drop(stream);
+    eprintln!("[stt] session ended (audio flowing: {got_audio})");
     Ok(())
+}
+
+/// Return the last `max` samples of `buf` (or all of them if shorter).
+fn tail_samples(buf: &[f32], max: usize) -> &[f32] {
+    if buf.len() > max {
+        &buf[buf.len() - max..]
+    } else {
+        buf
+    }
 }
 
 /// Decode `samples` and emit the non-empty transcript under `event`.

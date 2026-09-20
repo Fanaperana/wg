@@ -146,7 +146,9 @@ async fn copilot_token(state: &CopilotState, oauth_token: &str) -> Result<String
     Ok(token)
 }
 
-/// Send a chat completion request through the Copilot API and return the reply text.
+/// Send a chat completion request through the Copilot API and return the reply
+/// text. The model is given a `fetch_url` tool so it can pull in live web
+/// content (for example the user's portfolio) when it needs current facts.
 pub async fn chat(
     state: &CopilotState,
     oauth_token: &str,
@@ -154,38 +156,186 @@ pub async fn chat(
     messages: Value,
 ) -> Result<String, String> {
     let token = copilot_token(state, oauth_token).await?;
-
     let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "model": model,
-        "messages": messages,
-    });
 
-    let res = client
-        .post(CHAT_URL)
-        .bearer_auth(&token)
-        .header("Editor-Version", EDITOR_VERSION)
-        .header("Editor-Plugin-Version", PLUGIN_VERSION)
-        .header("Copilot-Integration-Id", INTEGRATION_ID)
-        .header("User-Agent", USER_AGENT)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut conversation: Vec<Value> = messages.as_array().cloned().unwrap_or_default();
 
-    let status = res.status();
-    let json: Value = res.json().await.map_err(|e| e.to_string())?;
+    let tools = serde_json::json!([{
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetch the readable text of a public web page. Use this whenever you need up-to-date or online information, or to look up details about the user (his portfolio is at https://fanaperana.github.io/portfolio/).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Absolute http(s) URL to fetch."
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    }]);
 
-    if !status.is_success() {
-        let msg = json
-            .pointer("/error/message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error from Copilot");
-        return Err(format!("Copilot ({status}): {msg}"));
+    // Bounded tool loop: let the model call fetch_url a few times, feeding each
+    // result back, then return its final text answer.
+    for _ in 0..4 {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": conversation,
+            "tools": tools,
+        });
+
+        let res = client
+            .post(CHAT_URL)
+            .bearer_auth(&token)
+            .header("Editor-Version", EDITOR_VERSION)
+            .header("Editor-Plugin-Version", PLUGIN_VERSION)
+            .header("Copilot-Integration-Id", INTEGRATION_ID)
+            .header("User-Agent", USER_AGENT)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let status = res.status();
+        let json: Value = res.json().await.map_err(|e| e.to_string())?;
+
+        if !status.is_success() {
+            let msg = json
+                .pointer("/error/message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error from Copilot");
+            return Err(format!("Copilot ({status}): {msg}"));
+        }
+
+        let message = json
+            .pointer("/choices/0/message")
+            .cloned()
+            .ok_or_else(|| "No message in Copilot response".to_string())?;
+
+        let tool_calls = message
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if tool_calls.is_empty() {
+            return message
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| "No content in Copilot response".to_string());
+        }
+
+        // Record the assistant's tool request, then answer each call.
+        conversation.push(message);
+        for call in tool_calls {
+            let id = call.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let name = call
+                .pointer("/function/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let args = call
+                .pointer("/function/arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
+
+            let result = if name == "fetch_url" {
+                let url = serde_json::from_str::<Value>(args)
+                    .ok()
+                    .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(String::from));
+                match url {
+                    Some(u) => fetch_url(&client, &u).await,
+                    None => "Error: missing 'url' argument.".to_string(),
+                }
+            } else {
+                format!("Error: unknown tool '{name}'.")
+            };
+
+            conversation.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": id,
+                "content": result,
+            }));
+        }
     }
 
-    json.pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "No content in Copilot response".to_string())
+    Err("The assistant made too many tool calls without answering.".to_string())
+}
+
+/// Fetch a public web page and return a trimmed plain-text approximation.
+async fn fetch_url(client: &reqwest::Client, url: &str) -> String {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return "Error: only absolute http(s) URLs are supported.".to_string();
+    }
+
+    let res = match client
+        .get(url)
+        .header("User-Agent", "wg-widget/0.1 (+https://github.com/Fanaperana)")
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return format!("Error fetching {url}: {e}"),
+    };
+
+    let status = res.status();
+    let html = match res.text().await {
+        Ok(t) => t,
+        Err(e) => return format!("Error reading {url}: {e}"),
+    };
+    if !status.is_success() {
+        return format!("Error: {url} returned HTTP {status}");
+    }
+
+    let text = html_to_text(&html);
+    let trimmed: String = text.chars().take(8000).collect();
+    if trimmed.is_empty() {
+        format!("Fetched {url} but found no readable text.")
+    } else {
+        format!("Contents of {url}:\n{trimmed}")
+    }
+}
+
+/// Crude HTML-to-text: drop script/style, strip tags, decode a few entities.
+fn html_to_text(html: &str) -> String {
+    let mut s = html.to_string();
+    for tag in ["script", "style", "noscript", "svg"] {
+        loop {
+            let lower = s.to_ascii_lowercase();
+            let Some(open) = lower.find(&format!("<{tag}")) else {
+                break;
+            };
+            let close = format!("</{tag}>");
+            let end = match lower[open..].find(&close) {
+                Some(j) => open + j + close.len(),
+                None => s.len(),
+            };
+            s.replace_range(open..end, " ");
+        }
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+
+    let out = out
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }

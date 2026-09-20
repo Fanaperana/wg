@@ -36,8 +36,15 @@ interface Message {
 }
 
 const CHAT_MODELS = ["gpt-4o-mini", "gpt-4o", "o3-mini", "claude-3.5-sonnet"];
-const SYSTEM_PROMPT =
-  "You are a concise, helpful assistant embedded in a desktop overlay widget.";
+const SYSTEM_PROMPT = `You are a concise, helpful assistant embedded in a desktop overlay widget for Fanaperana (Prince Fanaperana), a software engineer.
+
+About the user:
+- Software engineer, 6+ years, 46+ shipped projects (11 in Rust). Focus: Rust, TypeScript, WebAssembly, and agentic AI.
+- Builds small, sharp tools: CLIs, TUIs, tiny languages/parsers, numerics, Tauri desktop apps, Wayland compositors, and local-first AI agents. Prefers zero-JS-by-default pages, tiny bundles, and keyboard-first UIs (Svelte 5, React, Vue).
+- Notable work: sentinel & continuum (agentic AI), AVIL (self-improving SDLC research), MosaicFlow-Svelte (node-based canvas), semtree (incremental language infra), pskey (Tauri password manager), canvaswm (Wayland compositor), zigos/mineos (hobby OSes).
+- Contact: fanaperanaprince@gmail.com, github.com/Fanaperana, linkedin.com/in/prince-fanaperana. Remote, USA (EST). Open to opportunities.
+
+You can call the fetch_url tool to read public web pages. Use it whenever you need current or online information, or to look up details about the user — his portfolio is at https://fanaperana.github.io/portfolio/. Base answers on what you actually fetch, and keep replies concise.`;
 
 interface DeviceInfo {
   device_code: string;
@@ -69,6 +76,7 @@ function App() {
 
   const listRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<number | null>(null);
+  const stopFallbackRef = useRef<number | null>(null);
   // Live transcript for the in-progress dictation, plus refs so the (mount-only)
   // STT event listeners always see the latest state.
   const liveRef = useRef("");
@@ -113,6 +121,10 @@ function App() {
         if (e.payload === "loading") setStatus("Loading speech model…");
         else if (e.payload === "listening") setStatus("Listening…");
         else if (e.payload === "stopped") {
+          if (stopFallbackRef.current) {
+            window.clearTimeout(stopFallbackRef.current);
+            stopFallbackRef.current = null;
+          }
           setRecording(false);
           setStatus("");
           const text = liveRef.current.trim();
@@ -123,6 +135,10 @@ function App() {
         }
       }),
       listen<string>("stt-error", (e) => {
+        if (stopFallbackRef.current) {
+          window.clearTimeout(stopFallbackRef.current);
+          stopFallbackRef.current = null;
+        }
         setRecording(false);
         setStatus(String(e.payload));
       }),
@@ -232,6 +248,14 @@ function App() {
     setStatus("Finishing…");
     try {
       await invoke("stop_stt");
+      // Safety net: if the backend never reports "stopped" (e.g. the last
+      // decode is slow), don't leave the UI wedged on "Finishing…".
+      if (stopFallbackRef.current) window.clearTimeout(stopFallbackRef.current);
+      stopFallbackRef.current = window.setTimeout(() => {
+        stopFallbackRef.current = null;
+        setRecording(false);
+        setStatus("");
+      }, 4000);
     } catch (e) {
       setRecording(false);
       setStatus(String(e));
