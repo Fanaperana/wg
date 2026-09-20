@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -104,7 +105,7 @@ const SYSTEM_PROMPT = `You are a concise, helpful assistant embedded in a deskto
 45. make-the-doc-vue — Vue + Vite frontend for Make-The-Docs.
 46. rockdiva — Production website for Rockdiva Nails (Laravel), powering rockdivanails.com.
 
-The fetch_url tool reads public web pages when you need something beyond the above; his portfolio is https://fanaperana.github.io/portfolio/. Keep replies concise.`;
+The fetch_url tool reads public web pages when you need something beyond the above; his portfolio is https://fanaperana.github.io/portfolio/. The github_get tool does read-only GitHub REST GETs for his account (private and public repos, pull requests, commits, issues) — call it with a path like /user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member, /repos/OWNER/REPO/pulls?state=all, /repos/OWNER/REPO/commits?per_page=30, or /search/issues?q=author:USERNAME+is:pr. Use it whenever the user asks about their repositories, PRs, commits, or GitHub activity. Keep replies concise.`;
 
 interface DeviceInfo {
   device_code: string;
@@ -122,6 +123,9 @@ function App() {
   );
   const [autoSend, setAutoSend] = useState(
     () => localStorage.getItem("auto_send") !== "false"
+  );
+  const [githubToken, setGithubToken] = useState(
+    () => localStorage.getItem("github_token") ?? ""
   );
   const [models, setModels] = useState<string[]>(CHAT_MODELS);
   const [showSettings, setShowSettings] = useState(!copilotToken);
@@ -151,6 +155,9 @@ function App() {
   useEffect(() => {
     localStorage.setItem("copilot_oauth_token", copilotToken);
   }, [copilotToken]);
+  useEffect(() => {
+    localStorage.setItem("github_token", githubToken);
+  }, [githubToken]);
   useEffect(() => {
     localStorage.setItem("copilot_model", model);
   }, [model]);
@@ -291,12 +298,23 @@ function App() {
     try {
       const reply = await invoke<string>("ask_copilot", {
         token: copilotToken,
+        githubToken,
         model,
         messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
       });
       setMessages((m) => [...m, { role: "assistant", content: reply }]);
     } catch (e) {
-      setStatus(String(e));
+      const err = String(e);
+      // Some models the API advertises aren't reachable via chat completions.
+      // Drop the offender and fall back to a working model automatically.
+      if (/not accessible|not supported/i.test(err)) {
+        const next = models.filter((m) => m !== model);
+        setModels(next.length ? next : CHAT_MODELS);
+        setModel((next[0] ?? CHAT_MODELS[0]));
+        setStatus(`"${model}" isn't available for chat here — switched to ${next[0] ?? CHAT_MODELS[0]}. Try again.`);
+      } else {
+        setStatus(err);
+      }
     } finally {
       setBusy(false);
     }
@@ -448,6 +466,31 @@ function App() {
               <Switch checked={autoSend} onCheckedChange={setAutoSend} />
               Auto-send voice
             </label>
+          </div>
+          <div className="space-y-1">
+            <Label>GitHub token (read-only)</Label>
+            <Input
+              type="password"
+              placeholder="ghp_… — for reading your repos, PRs, commits"
+              value={githubToken}
+              onChange={(e) => setGithubToken(e.target.value)}
+              autoComplete="off"
+            />
+            <p className="text-[10px] text-muted-foreground">
+              Optional. Create a token with read-only repo access at{" "}
+              <button
+                type="button"
+                className="underline"
+                onClick={() =>
+                  openUrl(
+                    "https://github.com/settings/tokens/new?scopes=repo,read:org&description=wg%20read-only"
+                  )
+                }
+              >
+                github.com/settings/tokens
+              </button>
+              . Stored locally; enables private repo/PR/commit access.
+            </p>
           </div>
         </section>
       )}

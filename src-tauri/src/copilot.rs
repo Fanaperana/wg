@@ -226,31 +226,59 @@ pub async fn list_models(state: &CopilotState, oauth_token: &str) -> Result<Vec<
 pub async fn chat(
     state: &CopilotState,
     oauth_token: &str,
+    github_token: &str,
     model: &str,
     messages: Value,
 ) -> Result<String, String> {
     let token = copilot_token(state, oauth_token).await?;
     let client = reqwest::Client::new();
 
+    // Token used for GitHub REST reads: a dedicated PAT if provided, else the
+    // login token (public/user data only).
+    let gh_token = if github_token.trim().is_empty() {
+        oauth_token.to_string()
+    } else {
+        github_token.trim().to_string()
+    };
+
     let mut conversation: Vec<Value> = messages.as_array().cloned().unwrap_or_default();
 
-    let tools = serde_json::json!([{
-        "type": "function",
-        "function": {
-            "name": "fetch_url",
-            "description": "Fetch the readable text of a public web page. Use this whenever you need up-to-date or online information, or to look up details about the user (his portfolio is at https://fanaperana.github.io/portfolio/).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "Absolute http(s) URL to fetch."
-                    }
-                },
-                "required": ["url"]
+    let tools = serde_json::json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "fetch_url",
+                "description": "Fetch the readable text of a public web page. Use this whenever you need up-to-date or online information, or to look up details about the user (his portfolio is at https://fanaperana.github.io/portfolio/).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Absolute http(s) URL to fetch."
+                        }
+                    },
+                    "required": ["url"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "github_get",
+                "description": "Read-only GitHub REST API GET for the signed-in user (covers private and public repos, PRs, commits, issues). Provide a path beginning with '/'. Examples: /user, /user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member, /repos/OWNER/REPO/pulls?state=all&per_page=50, /repos/OWNER/REPO/commits?per_page=30, /search/issues?q=author:USERNAME+is:pr, /repos/OWNER/REPO/contents/PATH. Returns JSON.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "GitHub API path starting with '/', including any query string."
+                        }
+                    },
+                    "required": ["path"]
+                }
             }
         }
-    }]);
+    ]);
 
     // Bounded tool loop: let the model call fetch_url a few times, feeding each
     // result back, then return its final text answer. Some models (e.g. Claude
@@ -335,6 +363,14 @@ pub async fn chat(
                     Some(u) => fetch_url(&client, &u).await,
                     None => "Error: missing 'url' argument.".to_string(),
                 }
+            } else if name == "github_get" {
+                let path = serde_json::from_str::<Value>(args)
+                    .ok()
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from));
+                match path {
+                    Some(p) => github_get(&client, &gh_token, &p).await,
+                    None => "Error: missing 'path' argument.".to_string(),
+                }
             } else {
                 format!("Error: unknown tool '{name}'.")
             };
@@ -383,6 +419,50 @@ async fn fetch_url(client: &reqwest::Client, url: &str) -> String {
     } else {
         format!("Contents of {url}:\n{trimmed}")
     }
+}
+
+/// Read-only GitHub REST GET. Only api.github.com is contacted and only GET is
+/// implemented, so this can never modify data.
+async fn github_get(client: &reqwest::Client, token: &str, path: &str) -> String {
+    if token.trim().is_empty() {
+        return "Error: no GitHub token configured. Add one in settings to read GitHub.".to_string();
+    }
+    let p = path.trim();
+    if !p.starts_with('/') || p.contains("://") {
+        return "Error: path must start with '/' (e.g. /user/repos). Do not include a host."
+            .to_string();
+    }
+    let url = format!("https://api.github.com{p}");
+
+    let res = match client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "wg-widget/0.1 (+https://github.com/Fanaperana)")
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return format!("Error calling GitHub {p}: {e}"),
+    };
+
+    let status = res.status();
+    let body = match res.text().await {
+        Ok(t) => t,
+        Err(e) => return format!("Error reading GitHub {p}: {e}"),
+    };
+    if !status.is_success() {
+        let msg = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_else(|| body.chars().take(200).collect());
+        return format!("GitHub {p} returned HTTP {status}: {msg}");
+    }
+
+    let trimmed: String = body.chars().take(12000).collect();
+    format!("GET {p} ->\n{trimmed}")
 }
 
 /// Crude HTML-to-text: drop script/style, strip tags, decode a few entities.

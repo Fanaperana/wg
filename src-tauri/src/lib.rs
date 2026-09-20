@@ -24,6 +24,7 @@ async fn copilot_login_poll(device_code: String) -> Result<Option<String>, Strin
 #[tauri::command]
 async fn ask_copilot(
     token: String,
+    github_token: String,
     model: String,
     messages: Value,
     state: State<'_, CopilotState>,
@@ -31,7 +32,7 @@ async fn ask_copilot(
     if token.trim().is_empty() {
         return Err("Sign in with GitHub first".into());
     }
-    copilot::chat(&state, &token, &model, messages).await
+    copilot::chat(&state, &token, &github_token, &model, messages).await
 }
 
 /// List the chat models available to the signed-in Copilot account.
