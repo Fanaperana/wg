@@ -25,6 +25,9 @@ serde_json = "1"
 cpal = "0.15"
 sherpa-onnx = "1.13.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+xcap = { version = "0.9", features = ["image"] }
+png = "0.17"
+base64 = "0.22"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

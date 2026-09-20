@@ -1,7 +1,9 @@
+mod capture;
 mod copilot;
 mod stt;
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use copilot::{CopilotState, DeviceInfo};
 use serde_json::Value;
@@ -11,6 +13,14 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, State,
 };
+
+/// Holds the frozen full-screen frame while the region selector is open.
+#[derive(Default)]
+struct CaptureState(Mutex<Option<String>>);
+
+/// Saved main-window bounds (x, y, w, h in physical px) to restore after capture.
+#[derive(Default)]
+struct SavedBounds(Mutex<Option<(i32, i32, u32, u32)>>);
 
 /// Show the widget if hidden, hide it if visible.
 fn toggle_window(app: &tauri::AppHandle) {
@@ -81,6 +91,59 @@ fn is_recording(state: State<'_, SttState>) -> bool {
     state.is_recording()
 }
 
+/// Freeze the screen and expand the main widget into a fullscreen capture
+/// overlay. Reuses the main webview (which renders and is content-protected),
+/// so the overlay is excluded from screen sharing automatically. Returns the
+/// frozen frame as a PNG data URL for the overlay to crop client-side.
+#[tauri::command]
+fn enter_capture(
+    app: tauri::AppHandle,
+    cap: State<'_, CaptureState>,
+    saved: State<'_, SavedBounds>,
+) -> Result<String, String> {
+    let frame = capture::grab_primary()?;
+    *cap.0.lock().unwrap() = Some(frame.clone());
+
+    let win = app.get_webview_window("main").ok_or("no main window")?;
+    let pos = win.outer_position().map_err(|e| e.to_string())?;
+    let size = win.inner_size().map_err(|e| e.to_string())?;
+    *saved.0.lock().unwrap() = Some((pos.x, pos.y, size.width, size.height));
+
+    let monitor = win
+        .primary_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or("no primary monitor")?;
+    let mpos = monitor.position();
+    let msize = monitor.size();
+    // resizable:false blocks user resizing, not programmatic; toggle to be safe.
+    let _ = win.set_resizable(true);
+    win.set_position(tauri::PhysicalPosition::new(mpos.x, mpos.y))
+        .map_err(|e| e.to_string())?;
+    win.set_size(tauri::PhysicalSize::new(msize.width, msize.height))
+        .map_err(|e| e.to_string())?;
+    let _ = win.show();
+    let _ = win.set_focus();
+    Ok(frame)
+}
+
+/// Restore the main widget to its pre-capture size and position.
+#[tauri::command]
+fn exit_capture(app: tauri::AppHandle, saved: State<'_, SavedBounds>) -> Result<(), String> {
+    let win = app.get_webview_window("main").ok_or("no main window")?;
+    if let Some((x, y, w, h)) = saved.0.lock().unwrap().take() {
+        let _ = win.set_size(tauri::PhysicalSize::new(w, h));
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    let _ = win.set_resizable(false);
+    Ok(())
+}
+
+/// Return the frozen full-screen frame for the overlay to crop.
+#[tauri::command]
+fn get_capture_frame(state: State<'_, CaptureState>) -> Option<String> {
+    state.0.lock().unwrap().clone()
+}
+
 /// Locate the bundled `models` directory, falling back to the working dir in dev.
 fn resolve_models_dir(app: &tauri::App) -> PathBuf {
     if let Ok(path) = app
@@ -99,6 +162,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(CopilotState::default())
+        .manage(CaptureState::default())
+        .manage(SavedBounds::default())
         .setup(|app| {
             let handle = app.handle().clone();
             let models_dir = resolve_models_dir(app);
@@ -141,7 +206,10 @@ pub fn run() {
             copilot_models,
             start_stt,
             stop_stt,
-            is_recording
+            is_recording,
+            enter_capture,
+            exit_capture,
+            get_capture_frame
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

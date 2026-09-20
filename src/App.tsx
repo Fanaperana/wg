@@ -16,6 +16,7 @@ import {
   LogIn,
   LogOut,
   Brain,
+  ScanEye,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -36,6 +37,7 @@ interface Message {
   role: Role;
   content: string;
   thinking?: string[];
+  image?: string;
 }
 
 const CHAT_MODELS = [
@@ -143,6 +145,10 @@ function App() {
   // Live "thinking" lines for the in-progress request (tool calls, reasoning).
   const [thinking, setThinking] = useState<string[]>([]);
   const thinkingRef = useRef<string[]>([]);
+  // Pending screen-capture image (data URL) to attach to the next prompt.
+  const [attachment, setAttachment] = useState<string | null>(null);
+  // Frozen full-screen frame shown while the user drags a capture region.
+  const [captureFrame, setCaptureFrame] = useState<string | null>(null);
 
   const listRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<number | null>(null);
@@ -292,7 +298,7 @@ function App() {
 
   async function send(text: string) {
     const prompt = text.trim();
-    if (!prompt || busy) return;
+    if ((!prompt && !attachment) || busy) return;
     if (!copilotToken.trim()) {
       setShowSettings(true);
       setStatus("Sign in with GitHub Copilot first.");
@@ -300,9 +306,14 @@ function App() {
     }
 
     liveRef.current = "";
-    const history: Message[] = [...messages, { role: "user", content: prompt }];
+    const image = attachment ?? undefined;
+    const history: Message[] = [
+      ...messages,
+      { role: "user", content: prompt, image },
+    ];
     setMessages(history);
     setInput("");
+    setAttachment(null);
     setBusy(true);
     setStatus("");
     thinkingRef.current = [];
@@ -315,7 +326,17 @@ function App() {
         model,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          ...history.map((m) => ({ role: m.role, content: m.content })),
+          ...history.map((m) =>
+            m.image
+              ? {
+                  role: m.role,
+                  content: [
+                    { type: "text", text: m.content || "Describe this image." },
+                    { type: "image_url", image_url: { url: m.image } },
+                  ],
+                }
+              : { role: m.role, content: m.content }
+          ),
         ],
       });
       const thoughts = thinkingRef.current;
@@ -342,6 +363,33 @@ function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // Expand the widget into a fullscreen overlay and freeze the screen so the
+  // user can drag a region. The overlay lives in this (content-protected)
+  // window, so it never appears in a screen share.
+  async function startCapture() {
+    try {
+      const frame = await invoke<string>("enter_capture");
+      setCaptureFrame(frame);
+    } catch (e) {
+      setStatus(String(e));
+    }
+  }
+
+  async function finishCapture(dataUrl: string) {
+    setAttachment(dataUrl);
+    setCaptureFrame(null);
+    try {
+      await invoke("exit_capture");
+    } catch {}
+  }
+
+  async function cancelCapture() {
+    setCaptureFrame(null);
+    try {
+      await invoke("exit_capture");
+    } catch {}
   }
 
   async function toggleRecording() {
@@ -382,7 +430,15 @@ function App() {
   const appWindow = getCurrentWindow();
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden rounded-lg border border-border bg-background text-foreground backdrop-blur-xl">
+    <>
+      {captureFrame && (
+        <CaptureOverlay
+          frame={captureFrame}
+          onDone={finishCapture}
+          onCancel={cancelCapture}
+        />
+      )}
+      <div className="flex h-screen flex-col overflow-hidden rounded-lg border border-border bg-background text-foreground backdrop-blur-xl">
       {/* Title bar */}
       <header
         data-tauri-drag-region
@@ -577,6 +633,13 @@ function App() {
                   </div>
                 </details>
               )}
+              {m.image && (
+                <img
+                  src={m.image}
+                  alt="attachment"
+                  className="mb-1 max-h-40 rounded border border-border/60"
+                />
+              )}
               {m.content}
             </div>
           </div>
@@ -614,44 +677,188 @@ function App() {
 
       {/* Composer */}
       <form
-        className="flex shrink-0 items-end gap-1.5 border-t border-border p-2"
+        className="flex shrink-0 flex-col gap-1.5 border-t border-border p-2"
         onSubmit={(e) => {
           e.preventDefault();
           send(input);
         }}
       >
-        <Button
-          type="button"
-          size="icon"
-          variant={recording ? "destructive" : "secondary"}
-          title={recording ? "Stop capture" : "Capture system audio"}
-          className="shrink-0"
-          onClick={toggleRecording}
-        >
-          {recording ? <Square className="fill-current" /> : <Mic />}
-        </Button>
-        <Textarea
-          value={input}
-          placeholder="Ask Copilot…"
-          rows={1}
-          className="max-h-24 min-h-7 flex-1 cursor-default select-text"
-          onChange={(e) => setInput(e.currentTarget.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send(input);
-            }
+        {attachment && (
+          <div className="relative w-fit">
+            <img
+              src={attachment}
+              alt="pending capture"
+              className="max-h-28 rounded border border-border"
+            />
+            <button
+              type="button"
+              title="Remove"
+              className="absolute -top-1.5 -right-1.5 rounded-full border border-border bg-background p-0.5 text-muted-foreground hover:text-foreground"
+              onClick={() => setAttachment(null)}
+            >
+              <X className="size-3" />
+            </button>
+          </div>
+        )}
+        <div className="flex items-end gap-1.5">
+          <Button
+            type="button"
+            size="icon"
+            variant="secondary"
+            title="Capture a screen area"
+            className="shrink-0"
+            onClick={startCapture}
+          >
+            <ScanEye />
+          </Button>
+          <Button
+            type="button"
+            size="icon"
+            variant={recording ? "destructive" : "secondary"}
+            title={recording ? "Stop capture" : "Capture system audio"}
+            className="shrink-0"
+            onClick={toggleRecording}
+          >
+            {recording ? <Square className="fill-current" /> : <Mic />}
+          </Button>
+          <Textarea
+            value={input}
+            placeholder="Ask Copilot…"
+            rows={1}
+            className="max-h-24 min-h-7 flex-1 cursor-default select-text"
+            onChange={(e) => setInput(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send(input);
+              }
+            }}
+          />
+          <Button
+            type="submit"
+            size="icon"
+            className="shrink-0"
+            disabled={busy || (!input.trim() && !attachment)}
+          >
+            {busy ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
+          </Button>
+        </div>
+      </form>
+      </div>
+    </>
+  );
+}
+
+/// Fullscreen frozen-frame overlay: drag a rectangle to crop a region.
+function CaptureOverlay({
+  frame,
+  onDone,
+  onCancel,
+}: {
+  frame: string;
+  onDone: (dataUrl: string) => void;
+  onCancel: () => void;
+}) {
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [drag, setDrag] = useState<{ sx: number; sy: number } | null>(null);
+  const [rect, setRect] = useState<{
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  } | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  function finish(x: number, y: number, w: number, h: number) {
+    const img = imgRef.current;
+    if (!img || w < 5 || h < 5) {
+      onCancel();
+      return;
+    }
+    try {
+      // Map CSS (logical) pixels to the frame's native (physical) pixels.
+      const scaleX = img.naturalWidth / window.innerWidth;
+      const scaleY = img.naturalHeight / window.innerHeight;
+      const cx = Math.round(x * scaleX);
+      const cy = Math.round(y * scaleY);
+      const cw = Math.max(1, Math.round(w * scaleX));
+      const ch = Math.max(1, Math.round(h * scaleY));
+      const canvas = document.createElement("canvas");
+      canvas.width = cw;
+      canvas.height = ch;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        onCancel();
+        return;
+      }
+      ctx.drawImage(img, cx, cy, cw, ch, 0, 0, cw, ch);
+      onDone(canvas.toDataURL("image/png"));
+    } catch {
+      onCancel();
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-9999 cursor-crosshair select-none"
+      onMouseDown={(e) => {
+        if (e.button !== 0) return;
+        setDrag({ sx: e.clientX, sy: e.clientY });
+        setRect({ x: e.clientX, y: e.clientY, w: 0, h: 0 });
+      }}
+      onMouseMove={(e) => {
+        if (!drag) return;
+        setRect({
+          x: Math.min(drag.sx, e.clientX),
+          y: Math.min(drag.sy, e.clientY),
+          w: Math.abs(e.clientX - drag.sx),
+          h: Math.abs(e.clientY - drag.sy),
+        });
+      }}
+      onMouseUp={(e) => {
+        if (!drag) return;
+        const x = Math.min(drag.sx, e.clientX);
+        const y = Math.min(drag.sy, e.clientY);
+        const w = Math.abs(e.clientX - drag.sx);
+        const h = Math.abs(e.clientY - drag.sy);
+        setDrag(null);
+        finish(x, y, w, h);
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onCancel();
+      }}
+    >
+      <img
+        ref={imgRef}
+        src={frame}
+        alt=""
+        draggable={false}
+        className="pointer-events-none absolute inset-0 h-full w-full object-fill"
+      />
+      {!rect && <div className="pointer-events-none absolute inset-0 bg-black/40" />}
+      {rect && (
+        <div
+          className="pointer-events-none absolute border border-sky-400"
+          style={{
+            left: rect.x,
+            top: rect.y,
+            width: rect.w,
+            height: rect.h,
+            boxShadow: "0 0 0 100000px rgba(0,0,0,0.45)",
           }}
         />
-        <Button
-          type="submit"
-          size="icon"
-          className="shrink-0"
-          disabled={busy || !input.trim()}
-        >
-          {busy ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
-        </Button>
-      </form>
+      )}
+      <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-md bg-black/70 px-2.5 py-1 text-xs text-white">
+        Drag to capture · Esc / right-click to cancel
+      </div>
     </div>
   );
 }

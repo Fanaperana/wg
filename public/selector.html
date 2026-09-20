@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Select area</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        cursor: crosshair;
+        user-select: none;
+        background: transparent;
+      }
+      #frame {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100vh;
+        object-fit: fill;
+        -webkit-user-drag: none;
+      }
+      /* Dim the frozen screen; the selection punches a clear hole via box-shadow. */
+      #dim {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.45);
+      }
+      #sel {
+        position: fixed;
+        border: 1px solid #4aa3ff;
+        box-shadow: 0 0 0 100000px rgba(0, 0, 0, 0.45);
+        display: none;
+        pointer-events: none;
+      }
+      #hint {
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        font: 12px system-ui, sans-serif;
+        color: #fff;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 4px 10px;
+        border-radius: 6px;
+        pointer-events: none;
+        z-index: 10;
+      }
+    </style>
+  </head>
+  <body>
+    <img id="frame" alt="" />
+    <div id="dim"></div>
+    <div style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font:bold 42px system-ui,sans-serif;color:#fff;z-index:20;pointer-events:none;">SELECTOR LOADED</div>
+    <div id="hint">Drag to capture &middot; Esc / right-click to cancel</div>
+    <div id="sel"></div>
+    <script>
+      const T = window.__TAURI__;
+      const sel = document.getElementById("sel");
+      const dim = document.getElementById("dim");
+      const frame = document.getElementById("frame");
+      let sx = 0,
+        sy = 0,
+        dragging = false;
+
+      async function closeWin() {
+        try {
+          await T.window.getCurrentWindow().close();
+        } catch (e) {}
+      }
+
+      // Load the frozen screenshot as the backdrop.
+      (async () => {
+        try {
+          const url = await T.core.invoke("get_capture_frame");
+          if (url) frame.src = url;
+        } catch (err) {
+          await T.event.emit("region-error", String(err));
+          closeWin();
+        }
+      })();
+
+      addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        closeWin();
+      });
+      addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeWin();
+      });
+
+      addEventListener("mousedown", (e) => {
+        if (e.button !== 0) return;
+        dragging = true;
+        sx = e.clientX;
+        sy = e.clientY;
+        dim.style.display = "none"; // the #sel shadow now provides the dimming
+        sel.style.left = sx + "px";
+        sel.style.top = sy + "px";
+        sel.style.width = "0px";
+        sel.style.height = "0px";
+        sel.style.display = "block";
+      });
+
+      addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        const x = Math.min(sx, e.clientX);
+        const y = Math.min(sy, e.clientY);
+        sel.style.left = x + "px";
+        sel.style.top = y + "px";
+        sel.style.width = Math.abs(e.clientX - sx) + "px";
+        sel.style.height = Math.abs(e.clientY - sy) + "px";
+      });
+
+      addEventListener("mouseup", async (e) => {
+        if (!dragging) return;
+        dragging = false;
+        const x = Math.min(sx, e.clientX);
+        const y = Math.min(sy, e.clientY);
+        const w = Math.abs(e.clientX - sx);
+        const h = Math.abs(e.clientY - sy);
+        if (w < 5 || h < 5) {
+          closeWin();
+          return;
+        }
+        try {
+          // Map CSS pixels to the frame's native (physical) pixels.
+          const scaleX = frame.naturalWidth / window.innerWidth;
+          const scaleY = frame.naturalHeight / window.innerHeight;
+          const cx = Math.round(x * scaleX);
+          const cy = Math.round(y * scaleY);
+          const cw = Math.max(1, Math.round(w * scaleX));
+          const ch = Math.max(1, Math.round(h * scaleY));
+          const canvas = document.createElement("canvas");
+          canvas.width = cw;
+          canvas.height = ch;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(frame, cx, cy, cw, ch, 0, 0, cw, ch);
+          const dataUrl = canvas.toDataURL("image/png");
+          await T.event.emit("region-captured", dataUrl);
+        } catch (err) {
+          await T.event.emit("region-error", String(err));
+        }
+        closeWin();
+      });
+    </script>
+  </body>
+</html>
