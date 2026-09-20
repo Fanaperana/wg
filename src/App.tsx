@@ -807,7 +807,7 @@ function CaptureOverlay({
 
   return (
     <div
-      className="fixed inset-0 z-9999 cursor-crosshair select-none"
+      className="fixed inset-0 z-9999 cursor-default select-none"
       onMouseDown={(e) => {
         if (e.button !== 0) return;
         setDrag({ sx: e.clientX, sy: e.clientY });
