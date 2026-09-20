@@ -1,0 +1,5 @@
+# Don't commit the large model files; download them with scripts/download-models.ps1
+*.onnx
+sense-voice/
+*.tar.bz2
+!README.md

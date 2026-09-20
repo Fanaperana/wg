@@ -1,11 +1,12 @@
-mod audio;
 mod copilot;
-mod openai;
+mod stt;
 
-use audio::CaptureState;
+use std::path::PathBuf;
+
 use copilot::{CopilotState, DeviceInfo};
 use serde_json::Value;
-use tauri::State;
+use stt::SttState;
+use tauri::{Manager, State};
 
 /// Start the GitHub device-login flow for Copilot.
 #[tauri::command]
@@ -33,46 +34,53 @@ async fn ask_copilot(
     copilot::chat(&state, &token, &model, messages).await
 }
 
-/// Begin capturing system (loopback) audio.
+/// Start local speech-to-text on the system (loopback) audio.
 #[tauri::command]
-fn start_capture(state: State<'_, CaptureState>) -> Result<(), String> {
+fn start_stt(state: State<'_, SttState>) -> Result<(), String> {
     state.start()
 }
 
-/// Stop capturing audio, transcribe it, and return the recognized text.
+/// Stop the running speech-to-text session.
 #[tauri::command]
-async fn stop_capture_and_transcribe(
-    api_key: String,
-    model: String,
-    state: State<'_, CaptureState>,
-) -> Result<String, String> {
-    if api_key.trim().is_empty() {
-        return Err("Missing OpenAI API key".into());
-    }
-    let wav = state.stop()?;
-    if wav.len() <= 44 {
-        return Err("No audio was captured".into());
-    }
-    openai::transcribe(&api_key, &model, wav).await
+fn stop_stt(state: State<'_, SttState>) {
+    state.stop();
 }
 
 #[tauri::command]
-fn is_recording(state: State<'_, CaptureState>) -> bool {
+fn is_recording(state: State<'_, SttState>) -> bool {
     state.is_recording()
+}
+
+/// Locate the bundled `models` directory, falling back to the working dir in dev.
+fn resolve_models_dir(app: &tauri::App) -> PathBuf {
+    if let Ok(path) = app
+        .path()
+        .resolve("models", tauri::path::BaseDirectory::Resource)
+    {
+        if path.exists() {
+            return path;
+        }
+    }
+    PathBuf::from("models")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(CaptureState::default())
         .manage(CopilotState::default())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let models_dir = resolve_models_dir(app);
+            app.manage(SttState::new(handle, models_dir));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             copilot_login_start,
             copilot_login_poll,
             ask_copilot,
-            start_capture,
-            stop_capture_and_transcribe,
+            start_stt,
+            stop_stt,
             is_recording
         ])
         .run(tauri::generate_context!())

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -12,11 +13,10 @@ import {
   Loader2,
   Sparkles,
   User,
-  Github,
+  LogIn,
   LogOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -36,7 +36,6 @@ interface Message {
 }
 
 const CHAT_MODELS = ["gpt-4o-mini", "gpt-4o", "o3-mini", "claude-3.5-sonnet"];
-const TRANSCRIBE_MODEL = "whisper-1";
 const SYSTEM_PROMPT =
   "You are a concise, helpful assistant embedded in a desktop overlay widget.";
 
@@ -50,9 +49,6 @@ interface DeviceInfo {
 function App() {
   const [copilotToken, setCopilotToken] = useState(
     () => localStorage.getItem("copilot_oauth_token") ?? ""
-  );
-  const [apiKey, setApiKey] = useState(
-    () => localStorage.getItem("openai_api_key") ?? ""
   );
   const [model, setModel] = useState(
     () => localStorage.getItem("copilot_model") ?? CHAT_MODELS[0]
@@ -73,13 +69,19 @@ function App() {
 
   const listRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<number | null>(null);
+  // Live transcript for the in-progress dictation, plus refs so the (mount-only)
+  // STT event listeners always see the latest state.
+  const liveRef = useRef("");
+  const inputRef = useRef(input);
+  const autoSendRef = useRef(autoSend);
+  const sendRef = useRef<(text: string) => void>(() => {});
+
+  inputRef.current = input;
+  autoSendRef.current = autoSend;
 
   useEffect(() => {
     localStorage.setItem("copilot_oauth_token", copilotToken);
   }, [copilotToken]);
-  useEffect(() => {
-    localStorage.setItem("openai_api_key", apiKey);
-  }, [apiKey]);
   useEffect(() => {
     localStorage.setItem("copilot_model", model);
   }, [model]);
@@ -91,7 +93,42 @@ function App() {
   }, [messages, busy]);
   useEffect(() => {
     return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current);
+      if (pollRef.current) window.clearTimeout(pollRef.current);
+    };
+  }, []);
+
+  // Subscribe to local speech-to-text events once.
+  useEffect(() => {
+    const subs = [
+      listen<string>("stt-final", (e) => {
+        const t = e.payload.trim();
+        if (!t) return;
+        liveRef.current = liveRef.current ? `${liveRef.current} ${t}` : t;
+        setInput(liveRef.current);
+      }),
+      listen<string>("stt-partial", (e) => {
+        setStatus(`Listening… ${e.payload}`);
+      }),
+      listen<string>("stt-status", (e) => {
+        if (e.payload === "loading") setStatus("Loading speech model…");
+        else if (e.payload === "listening") setStatus("Listening…");
+        else if (e.payload === "stopped") {
+          setRecording(false);
+          setStatus("");
+          const text = liveRef.current.trim();
+          if (autoSendRef.current && text) {
+            liveRef.current = "";
+            sendRef.current(text);
+          }
+        }
+      }),
+      listen<string>("stt-error", (e) => {
+        setRecording(false);
+        setStatus(String(e.payload));
+      }),
+    ];
+    return () => {
+      subs.forEach((p) => p.then((un) => un()));
     };
   }, []);
 
@@ -102,36 +139,44 @@ function App() {
       const info = await invoke<DeviceInfo>("copilot_login_start");
       setLogin({ userCode: info.user_code, uri: info.verification_uri });
       await openUrl(info.verification_uri).catch(() => {});
+
+      // Poll with a 1s buffer over GitHub's interval to avoid `slow_down`
+      // throttling, and give up after a few minutes instead of hanging forever.
+      const stepMs = (Math.max(info.interval, 5) + 1) * 1000;
+      const deadline = Date.now() + 5 * 60 * 1000;
       const poll = async () => {
         try {
           const token = await invoke<string | null>("copilot_login_poll", {
             deviceCode: info.device_code,
           });
           if (token) {
-            if (pollRef.current) window.clearInterval(pollRef.current);
             pollRef.current = null;
             setCopilotToken(token);
             setLogin(null);
             setStatus("Signed in with GitHub Copilot.");
+            return;
           }
+          if (Date.now() > deadline) {
+            pollRef.current = null;
+            setLogin(null);
+            setStatus("Login timed out. Please try signing in again.");
+            return;
+          }
+          pollRef.current = window.setTimeout(poll, stepMs);
         } catch (e) {
-          if (pollRef.current) window.clearInterval(pollRef.current);
           pollRef.current = null;
           setLogin(null);
           setStatus(String(e));
         }
       };
-      pollRef.current = window.setInterval(
-        poll,
-        Math.max(info.interval, 5) * 1000
-      );
+      pollRef.current = window.setTimeout(poll, stepMs);
     } catch (e) {
       setStatus(String(e));
     }
   }
 
   function signOut() {
-    if (pollRef.current) window.clearInterval(pollRef.current);
+    if (pollRef.current) window.clearTimeout(pollRef.current);
     pollRef.current = null;
     setLogin(null);
     setCopilotToken("");
@@ -147,6 +192,7 @@ function App() {
       return;
     }
 
+    liveRef.current = "";
     const history: Message[] = [...messages, { role: "user", content: prompt }];
     setMessages(history);
     setInput("");
@@ -169,47 +215,30 @@ function App() {
 
   async function toggleRecording() {
     if (busy) return;
-    if (!apiKey.trim()) {
-      setShowSettings(true);
-      setStatus("Voice needs an OpenAI API key (Copilot has no transcription).");
-      return;
-    }
 
     if (!recording) {
+      // Continue appending onto whatever is already in the box.
+      liveRef.current = inputRef.current;
       try {
-        await invoke("start_capture");
+        await invoke("start_stt");
         setRecording(true);
-        setStatus("Capturing system audio…");
+        setStatus("Listening…");
       } catch (e) {
         setStatus(String(e));
       }
       return;
     }
 
-    setRecording(false);
-    setBusy(true);
-    setStatus("Transcribing…");
+    setStatus("Finishing…");
     try {
-      const text = await invoke<string>("stop_capture_and_transcribe", {
-        apiKey,
-        model: TRANSCRIBE_MODEL,
-      });
-      setStatus("");
-      if (!text.trim()) {
-        setStatus("Nothing was transcribed.");
-      } else if (autoSend) {
-        setBusy(false);
-        await send(text);
-        return;
-      } else {
-        setInput((prev) => (prev ? `${prev} ${text}` : text));
-      }
+      await invoke("stop_stt");
     } catch (e) {
+      setRecording(false);
       setStatus(String(e));
-    } finally {
-      setBusy(false);
     }
   }
+
+  sendRef.current = send;
 
   const appWindow = getCurrentWindow();
 
@@ -225,7 +254,7 @@ function App() {
           className="flex items-center gap-1.5 text-xs font-semibold"
         >
           <Sparkles className="size-3.5 text-primary" />
-          <span data-tauri-drag-region>ChatGPT Widget</span>
+          <span data-tauri-drag-region>Copilot Widget</span>
         </div>
         <div className="flex items-center gap-0.5">
           <Button
@@ -264,7 +293,7 @@ function App() {
             {copilotToken ? (
               <div className="flex items-center justify-between gap-2 rounded-md bg-secondary px-2 py-1.5 text-[11px]">
                 <span className="flex items-center gap-1.5 text-secondary-foreground">
-                  <Github className="size-3.5" /> Signed in
+                  <LogIn className="size-3.5" /> Signed in
                 </span>
                 <Button variant="ghost" size="sm" onClick={signOut}>
                   <LogOut className="size-3.5" /> Sign out
@@ -298,7 +327,7 @@ function App() {
                 className="w-full"
                 onClick={startLogin}
               >
-                <Github className="size-3.5" /> Sign in with GitHub
+                <LogIn className="size-3.5" /> Sign in with GitHub
               </Button>
             )}
           </div>
@@ -323,17 +352,6 @@ function App() {
               Auto-send voice
             </label>
           </div>
-          <div className="space-y-1">
-            <Label htmlFor="api-key">OpenAI API key (optional, voice only)</Label>
-            <Input
-              id="api-key"
-              type="password"
-              value={apiKey}
-              placeholder="sk-…"
-              autoComplete="off"
-              onChange={(e) => setApiKey(e.currentTarget.value)}
-            />
-          </div>
         </section>
       )}
 
@@ -345,7 +363,7 @@ function App() {
             <p className="text-[11px] leading-tight">
               Type a prompt or capture system
               <br />
-              audio to ask ChatGPT.
+              audio to ask Copilot.
             </p>
           </div>
         )}
@@ -420,7 +438,7 @@ function App() {
         </Button>
         <Textarea
           value={input}
-          placeholder="Ask ChatGPT…"
+          placeholder="Ask Copilot…"
           rows={1}
           className="max-h-24 min-h-7 flex-1 select-text"
           onChange={(e) => setInput(e.currentTarget.value)}
