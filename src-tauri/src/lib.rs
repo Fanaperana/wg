@@ -87,6 +87,10 @@ pub fn run() {
             let handle = app.handle().clone();
             let models_dir = resolve_models_dir(app);
             app.manage(SttState::new(handle, models_dir));
+            // Enforce exclusion from screen capture/recording at runtime.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_content_protected(true);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

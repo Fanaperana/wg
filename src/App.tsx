@@ -555,7 +555,7 @@ function App() {
             </div>
             <div
               className={cn(
-                "max-w-[85%] whitespace-pre-wrap rounded-md px-2 py-1 text-xs leading-snug select-text",
+                "max-w-[85%] whitespace-pre-wrap rounded-md px-2 py-1 text-xs leading-snug cursor-default select-text",
                 m.role === "user"
                   ? "bg-primary text-primary-foreground"
                   : "bg-secondary text-secondary-foreground"
