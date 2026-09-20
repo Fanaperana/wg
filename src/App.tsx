@@ -15,6 +15,7 @@ import {
   User,
   LogIn,
   LogOut,
+  Brain,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -34,6 +35,7 @@ type Role = "user" | "assistant" | "system";
 interface Message {
   role: Role;
   content: string;
+  thinking?: string[];
 }
 
 const CHAT_MODELS = [
@@ -138,6 +140,9 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   const [status, setStatus] = useState("");
+  // Live "thinking" lines for the in-progress request (tool calls, reasoning).
+  const [thinking, setThinking] = useState<string[]>([]);
+  const thinkingRef = useRef<string[]>([]);
 
   const listRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<number | null>(null);
@@ -222,6 +227,12 @@ function App() {
         setRecording(false);
         setStatus(String(e.payload));
       }),
+      listen<string>("copilot-thinking", (e) => {
+        const line = e.payload.trim();
+        if (!line) return;
+        thinkingRef.current = [...thinkingRef.current, line];
+        setThinking(thinkingRef.current);
+      }),
     ];
     return () => {
       subs.forEach((p) => p.then((un) => un()));
@@ -294,6 +305,8 @@ function App() {
     setInput("");
     setBusy(true);
     setStatus("");
+    thinkingRef.current = [];
+    setThinking([]);
 
     try {
       const reply = await invoke<string>("ask_copilot", {
@@ -302,7 +315,15 @@ function App() {
         model,
         messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
       });
-      setMessages((m) => [...m, { role: "assistant", content: reply }]);
+      const thoughts = thinkingRef.current;
+      setMessages((m) => [
+        ...m,
+        {
+          role: "assistant",
+          content: reply,
+          thinking: thoughts.length ? thoughts : undefined,
+        },
+      ]);
     } catch (e) {
       const err = String(e);
       // Some models the API advertises aren't reachable via chat completions.
@@ -537,16 +558,46 @@ function App() {
                   : "bg-secondary text-secondary-foreground"
               )}
             >
+              {m.thinking && m.thinking.length > 0 && (
+                <details className="mb-1 rounded border border-border/60 bg-background/40 px-1.5 py-0.5">
+                  <summary className="flex cursor-pointer items-center gap-1 text-[10px] text-muted-foreground select-none">
+                    <Brain className="size-2.5" />
+                    Thought for {m.thinking.length} step
+                    {m.thinking.length > 1 ? "s" : ""}
+                  </summary>
+                  <div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground">
+                    {m.thinking.map((t, j) => (
+                      <div key={j} className="whitespace-pre-wrap">
+                        {t}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
               {m.content}
             </div>
           </div>
         ))}
         {busy && (
-          <div className="flex items-center gap-1.5 text-muted-foreground">
-            <div className="flex size-4 items-center justify-center rounded-full bg-accent">
+          <div className="flex items-start gap-1.5 text-muted-foreground">
+            <div className="mt-0.5 flex size-4 items-center justify-center rounded-full bg-accent">
               <Sparkles className="size-2.5" />
             </div>
-            <Loader2 className="size-3.5 animate-spin" />
+            {thinking.length > 0 ? (
+              <div className="max-w-[85%] rounded-md border border-border/60 bg-background/40 px-2 py-1 text-[10px]">
+                <div className="mb-0.5 flex items-center gap-1 text-muted-foreground">
+                  <Brain className="size-2.5 animate-pulse" />
+                  Thinking…
+                </div>
+                <div className="space-y-0.5 whitespace-pre-wrap">
+                  {thinking.map((t, j) => (
+                    <div key={j}>{t}</div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <Loader2 className="mt-0.5 size-3.5 animate-spin" />
+            )}
           </div>
         )}
       </div>

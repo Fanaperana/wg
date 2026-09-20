@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
+use tauri::Emitter;
 
 // Public client id used by GitHub Copilot editor integrations for the device flow.
 const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
@@ -224,6 +225,7 @@ pub async fn list_models(state: &CopilotState, oauth_token: &str) -> Result<Vec<
 /// text. The model is given a `fetch_url` tool so it can pull in live web
 /// content (for example the user's portfolio) when it needs current facts.
 pub async fn chat(
+    app: &tauri::AppHandle,
     state: &CopilotState,
     oauth_token: &str,
     github_token: &str,
@@ -232,6 +234,11 @@ pub async fn chat(
 ) -> Result<String, String> {
     let token = copilot_token(state, oauth_token).await?;
     let client = reqwest::Client::new();
+
+    // Emit a line into the live "thinking" stream shown in the UI.
+    let think = |text: String| {
+        let _ = app.emit("copilot-thinking", text);
+    };
 
     // Token used for GitHub REST reads: a dedicated PAT if provided, else the
     // login token (public/user data only).
@@ -265,7 +272,7 @@ pub async fn chat(
             "type": "function",
             "function": {
                 "name": "github_get",
-                "description": "Read-only GitHub REST API GET for the signed-in user (covers private and public repos, PRs, commits, issues). Provide a path beginning with '/'. Examples: /user, /user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member, /repos/OWNER/REPO/pulls?state=all&per_page=50, /repos/OWNER/REPO/commits?per_page=30, /search/issues?q=author:USERNAME+is:pr, /repos/OWNER/REPO/contents/PATH. Returns JSON.",
+                "description": "Read-only GitHub REST API GET for the signed-in user (covers private and public repos, PRs, commits, issues). Provide a path beginning with '/'. To COUNT repositories, call /user and read public_repos, total_private_repos and owned_private_repos (do not paginate). Other examples: /user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member, /repos/OWNER/REPO/pulls?state=all&per_page=50, /repos/OWNER/REPO/commits?per_page=30, /search/issues?q=author:USERNAME+is:pr, /repos/OWNER/REPO/contents/PATH. Returns JSON.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -280,13 +287,17 @@ pub async fn chat(
         }
     ]);
 
-    // Bounded tool loop: let the model call fetch_url a few times, feeding each
-    // result back, then return its final text answer. Some models (e.g. Claude
-    // or Gemini via Copilot) may reject the `tools` field — fall back to a
-    // plain request in that case so every model still works.
+    // Bounded tool loop: let the model call tools a number of times, feeding
+    // each result back, then return its final text answer. Some models (e.g.
+    // Claude or Gemini via Copilot) may reject the `tools` field — fall back to
+    // a plain request in that case so every model still works.
     let mut use_tools = true;
-    for _ in 0..5 {
-        let body = if use_tools {
+    let max_rounds = 12;
+    for round in 0..max_rounds {
+        // On the last allowed round, drop tools so the model is forced to
+        // produce a final text answer instead of requesting yet another call.
+        let offer_tools = use_tools && round < max_rounds - 1;
+        let body = if offer_tools {
             serde_json::json!({ "model": model, "messages": conversation, "tools": tools })
         } else {
             serde_json::json!({ "model": model, "messages": conversation })
@@ -312,7 +323,7 @@ pub async fn chat(
 
         if !status.is_success() {
             // Retry once without tools if the model doesn't accept them.
-            if use_tools && status.as_u16() == 400 {
+            if offer_tools && status.as_u16() == 400 {
                 use_tools = false;
                 continue;
             }
@@ -328,6 +339,16 @@ pub async fn chat(
             .cloned()
             .ok_or_else(|| "No message in Copilot response".to_string())?;
 
+        // Surface any chain-of-thought / narration the model returned so the UI
+        // can show it, mirroring VS Code's "thinking" panel.
+        for key in ["reasoning_content", "reasoning"] {
+            if let Some(r) = message.get(key).and_then(|v| v.as_str()) {
+                if !r.trim().is_empty() {
+                    think(r.trim().to_string());
+                }
+            }
+        }
+
         let tool_calls = message
             .get("tool_calls")
             .and_then(|v| v.as_array())
@@ -340,6 +361,13 @@ pub async fn chat(
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .ok_or_else(|| "No content in Copilot response".to_string());
+        }
+
+        // If the model narrated before calling tools, show that too.
+        if let Some(c) = message.get("content").and_then(|v| v.as_str()) {
+            if !c.trim().is_empty() {
+                think(c.trim().to_string());
+            }
         }
 
         // Record the assistant's tool request, then answer each call.
@@ -360,7 +388,10 @@ pub async fn chat(
                     .ok()
                     .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(String::from));
                 match url {
-                    Some(u) => fetch_url(&client, &u).await,
+                    Some(u) => {
+                        think(format!("Fetching {u}"));
+                        fetch_url(&client, &u).await
+                    }
                     None => "Error: missing 'url' argument.".to_string(),
                 }
             } else if name == "github_get" {
@@ -368,7 +399,10 @@ pub async fn chat(
                     .ok()
                     .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from));
                 match path {
-                    Some(p) => github_get(&client, &gh_token, &p).await,
+                    Some(p) => {
+                        think(format!("GitHub GET {p}"));
+                        github_get(&client, &gh_token, &p).await
+                    }
                     None => "Error: missing 'path' argument.".to_string(),
                 }
             } else {
