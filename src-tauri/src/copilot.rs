@@ -43,6 +43,26 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Generate a random v4-style UUID string without pulling in a dependency.
+fn request_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let a = (nanos as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let b = ((nanos >> 64) as u64 ^ 0xD1B5_4A32_D192_ED03).wrapping_mul(0x2545_F491_4F6C_DD1D);
+    let b = (b & 0x0FFF_FFFF_FFFF_FFFF) | 0x4000_0000_0000_0000; // version 4
+    let b = (b & 0x3FFF_FFFF_FFFF_FFFF) | 0x8000_0000_0000_0000; // variant
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        (a >> 32) as u32,
+        (a >> 16) as u16,
+        a as u16,
+        (b >> 48) as u16,
+        b & 0xFFFF_FFFF_FFFF
+    )
+}
+
 /// Begin the device authorization flow and return the code the user must enter.
 pub async fn start_device_flow() -> Result<DeviceInfo, String> {
     let client = reqwest::Client::new();
@@ -146,6 +166,60 @@ async fn copilot_token(state: &CopilotState, oauth_token: &str) -> Result<String
     Ok(token)
 }
 
+/// Fetch the chat models the signed-in account is allowed to use.
+pub async fn list_models(state: &CopilotState, oauth_token: &str) -> Result<Vec<String>, String> {
+    let token = copilot_token(state, oauth_token).await?;
+    let client = reqwest::Client::new();
+
+    let res = client
+        .get("https://api.githubcopilot.com/models")
+        .bearer_auth(&token)
+        .header("Editor-Version", EDITOR_VERSION)
+        .header("Editor-Plugin-Version", PLUGIN_VERSION)
+        .header("Copilot-Integration-Id", INTEGRATION_ID)
+        .header("Openai-Intent", "conversation-panel")
+        .header("X-Request-Id", request_id())
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = res.status();
+    let json: Value = res.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = json
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Could not list models");
+        return Err(format!("Copilot ({status}): {msg}"));
+    }
+
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
+        for m in arr {
+            // Only chat-capable models; skip embeddings and disabled entries.
+            let enabled = m
+                .pointer("/model_picker_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let is_chat = m
+                .pointer("/capabilities/type")
+                .and_then(|v| v.as_str())
+                .map(|t| t == "chat")
+                .unwrap_or(true);
+            if !enabled || !is_chat {
+                continue;
+            }
+            if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
+                if !ids.iter().any(|x| x == id) {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+    }
+    Ok(ids)
+}
+
 /// Send a chat completion request through the Copilot API and return the reply
 /// text. The model is given a `fetch_url` tool so it can pull in live web
 /// content (for example the user's portfolio) when it needs current facts.
@@ -196,6 +270,8 @@ pub async fn chat(
             .header("Editor-Version", EDITOR_VERSION)
             .header("Editor-Plugin-Version", PLUGIN_VERSION)
             .header("Copilot-Integration-Id", INTEGRATION_ID)
+            .header("Openai-Intent", "conversation-panel")
+            .header("X-Request-Id", request_id())
             .header("User-Agent", USER_AGENT)
             .json(&body)
             .send()
@@ -203,7 +279,8 @@ pub async fn chat(
             .map_err(|e| e.to_string())?;
 
         let status = res.status();
-        let json: Value = res.json().await.map_err(|e| e.to_string())?;
+        let raw = res.text().await.map_err(|e| e.to_string())?;
+        let json: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
 
         if !status.is_success() {
             // Retry once without tools if the model doesn't accept them.
@@ -214,7 +291,7 @@ pub async fn chat(
             let msg = json
                 .pointer("/error/message")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Unknown error from Copilot");
+                .unwrap_or_else(|| if raw.is_empty() { "Unknown error from Copilot" } else { raw.trim() });
             return Err(format!("Copilot ({status}): {msg}"));
         }
 

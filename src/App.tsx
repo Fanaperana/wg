@@ -123,6 +123,7 @@ function App() {
   const [autoSend, setAutoSend] = useState(
     () => localStorage.getItem("auto_send") !== "false"
   );
+  const [models, setModels] = useState<string[]>(CHAT_MODELS);
   const [showSettings, setShowSettings] = useState(!copilotToken);
   const [login, setLogin] = useState<{ userCode: string; uri: string } | null>(
     null
@@ -153,6 +154,18 @@ function App() {
   useEffect(() => {
     localStorage.setItem("copilot_model", model);
   }, [model]);
+  // Load the models the account can actually use so the dropdown never offers
+  // an unsupported one.
+  useEffect(() => {
+    if (!copilotToken) return;
+    invoke<string[]>("copilot_models", { token: copilotToken })
+      .then((list) => {
+        if (!list.length) return;
+        setModels(list);
+        setModel((m) => (list.includes(m) ? m : list[0]));
+      })
+      .catch(() => {});
+  }, [copilotToken]);
   useEffect(() => {
     localStorage.setItem("auto_send", String(autoSend));
   }, [autoSend]);
@@ -423,7 +436,7 @@ function App() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {CHAT_MODELS.map((m) => (
+                  {models.map((m) => (
                     <SelectItem key={m} value={m}>
                       {m}
                     </SelectItem>

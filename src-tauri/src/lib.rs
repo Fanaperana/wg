@@ -34,6 +34,18 @@ async fn ask_copilot(
     copilot::chat(&state, &token, &model, messages).await
 }
 
+/// List the chat models available to the signed-in Copilot account.
+#[tauri::command]
+async fn copilot_models(
+    token: String,
+    state: State<'_, CopilotState>,
+) -> Result<Vec<String>, String> {
+    if token.trim().is_empty() {
+        return Err("Sign in with GitHub first".into());
+    }
+    copilot::list_models(&state, &token).await
+}
+
 /// Start local speech-to-text on the system (loopback) audio.
 #[tauri::command]
 fn start_stt(state: State<'_, SttState>) -> Result<(), String> {
@@ -79,6 +91,7 @@ pub fn run() {
             copilot_login_start,
             copilot_login_poll,
             ask_copilot,
+            copilot_models,
             start_stt,
             stop_stt,
             is_recording
