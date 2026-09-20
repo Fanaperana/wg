@@ -1,21 +1,36 @@
 mod audio;
+mod copilot;
 mod openai;
 
 use audio::CaptureState;
+use copilot::{CopilotState, DeviceInfo};
 use serde_json::Value;
 use tauri::State;
 
-/// Send a prompt (with optional prior conversation) to ChatGPT.
+/// Start the GitHub device-login flow for Copilot.
 #[tauri::command]
-async fn ask_chatgpt(
-    api_key: String,
+async fn copilot_login_start() -> Result<DeviceInfo, String> {
+    copilot::start_device_flow().await
+}
+
+/// Poll the device flow; returns the OAuth token once the user finishes, else null.
+#[tauri::command]
+async fn copilot_login_poll(device_code: String) -> Result<Option<String>, String> {
+    copilot::poll_access_token(&device_code).await
+}
+
+/// Send a prompt (with optional prior conversation) to Copilot.
+#[tauri::command]
+async fn ask_copilot(
+    token: String,
     model: String,
     messages: Value,
+    state: State<'_, CopilotState>,
 ) -> Result<String, String> {
-    if api_key.trim().is_empty() {
-        return Err("Missing OpenAI API key".into());
+    if token.trim().is_empty() {
+        return Err("Sign in with GitHub first".into());
     }
-    openai::chat(&api_key, &model, messages).await
+    copilot::chat(&state, &token, &model, messages).await
 }
 
 /// Begin capturing system (loopback) audio.
@@ -51,8 +66,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(CaptureState::default())
+        .manage(CopilotState::default())
         .invoke_handler(tauri::generate_handler![
-            ask_chatgpt,
+            copilot_login_start,
+            copilot_login_poll,
+            ask_copilot,
             start_capture,
             stop_capture_and_transcribe,
             is_recording
