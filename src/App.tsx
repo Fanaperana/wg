@@ -634,7 +634,7 @@ function App() {
           value={input}
           placeholder="Ask Copilot…"
           rows={1}
-          className="max-h-24 min-h-7 flex-1 select-text"
+          className="max-h-24 min-h-7 flex-1 cursor-default select-text"
           onChange={(e) => setInput(e.currentTarget.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
