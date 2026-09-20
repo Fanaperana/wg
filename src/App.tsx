@@ -1,50 +1,335 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  Settings2,
+  Minus,
+  X,
+  Mic,
+  Square,
+  SendHorizontal,
+  Loader2,
+  Sparkles,
+  User,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { cn } from "@/lib/utils";
+
+type Role = "user" | "assistant" | "system";
+interface Message {
+  role: Role;
+  content: string;
+}
+
+const CHAT_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"];
+const TRANSCRIBE_MODEL = "whisper-1";
+const SYSTEM_PROMPT =
+  "You are a concise, helpful assistant embedded in a desktop overlay widget.";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [apiKey, setApiKey] = useState(
+    () => localStorage.getItem("openai_api_key") ?? ""
+  );
+  const [model, setModel] = useState(
+    () => localStorage.getItem("openai_model") ?? CHAT_MODELS[0]
+  );
+  const [autoSend, setAutoSend] = useState(
+    () => localStorage.getItem("auto_send") !== "false"
+  );
+  const [showSettings, setShowSettings] = useState(!apiKey);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [status, setStatus] = useState("");
+
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    localStorage.setItem("openai_api_key", apiKey);
+  }, [apiKey]);
+  useEffect(() => {
+    localStorage.setItem("openai_model", model);
+  }, [model]);
+  useEffect(() => {
+    localStorage.setItem("auto_send", String(autoSend));
+  }, [autoSend]);
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+  }, [messages, busy]);
+
+  async function send(text: string) {
+    const prompt = text.trim();
+    if (!prompt || busy) return;
+    if (!apiKey.trim()) {
+      setShowSettings(true);
+      setStatus("Add your OpenAI API key first.");
+      return;
+    }
+
+    const history: Message[] = [...messages, { role: "user", content: prompt }];
+    setMessages(history);
+    setInput("");
+    setBusy(true);
+    setStatus("");
+
+    try {
+      const reply = await invoke<string>("ask_chatgpt", {
+        apiKey,
+        model,
+        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
+      });
+      setMessages((m) => [...m, { role: "assistant", content: reply }]);
+    } catch (e) {
+      setStatus(String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
+  async function toggleRecording() {
+    if (busy) return;
+    if (!apiKey.trim()) {
+      setShowSettings(true);
+      setStatus("Add your OpenAI API key first.");
+      return;
+    }
+
+    if (!recording) {
+      try {
+        await invoke("start_capture");
+        setRecording(true);
+        setStatus("Capturing system audio…");
+      } catch (e) {
+        setStatus(String(e));
+      }
+      return;
+    }
+
+    setRecording(false);
+    setBusy(true);
+    setStatus("Transcribing…");
+    try {
+      const text = await invoke<string>("stop_capture_and_transcribe", {
+        apiKey,
+        model: TRANSCRIBE_MODEL,
+      });
+      setStatus("");
+      if (!text.trim()) {
+        setStatus("Nothing was transcribed.");
+      } else if (autoSend) {
+        setBusy(false);
+        await send(text);
+        return;
+      } else {
+        setInput((prev) => (prev ? `${prev} ${text}` : text));
+      }
+    } catch (e) {
+      setStatus(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const appWindow = getCurrentWindow();
+
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+    <div className="flex h-screen flex-col overflow-hidden rounded-lg border border-border bg-background text-foreground backdrop-blur-xl">
+      {/* Title bar */}
+      <header
+        data-tauri-drag-region
+        className="flex h-8 shrink-0 items-center justify-between border-b border-border px-2"
+      >
+        <div
+          data-tauri-drag-region
+          className="flex items-center gap-1.5 text-xs font-semibold"
+        >
+          <Sparkles className="size-3.5 text-primary" />
+          <span data-tauri-drag-region>ChatGPT Widget</span>
+        </div>
+        <div className="flex items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="Settings"
+            onClick={() => setShowSettings((s) => !s)}
+          >
+            <Settings2 />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="Minimize"
+            onClick={() => appWindow.minimize()}
+          >
+            <Minus />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="Close"
+            className="hover:bg-destructive hover:text-white"
+            onClick={() => appWindow.close()}
+          >
+            <X />
+          </Button>
+        </div>
+      </header>
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+      {/* Settings */}
+      {showSettings && (
+        <section className="shrink-0 space-y-2 border-b border-border bg-card/50 p-2">
+          <div className="space-y-1">
+            <Label htmlFor="api-key">OpenAI API key</Label>
+            <Input
+              id="api-key"
+              type="password"
+              value={apiKey}
+              placeholder="sk-…"
+              autoComplete="off"
+              onChange={(e) => setApiKey(e.currentTarget.value)}
+            />
+          </div>
+          <div className="flex items-end gap-2">
+            <div className="flex-1 space-y-1">
+              <Label>Model</Label>
+              <Select value={model} onValueChange={setModel}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {CHAT_MODELS.map((m) => (
+                    <SelectItem key={m} value={m}>
+                      {m}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <label className="flex h-7 items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Switch checked={autoSend} onCheckedChange={setAutoSend} />
+              Auto-send voice
+            </label>
+          </div>
+        </section>
+      )}
+
+      {/* Messages */}
+      <div ref={listRef} className="flex-1 space-y-1.5 overflow-y-auto p-2">
+        {messages.length === 0 && (
+          <div className="flex h-full flex-col items-center justify-center gap-1.5 text-center text-muted-foreground">
+            <Sparkles className="size-5 opacity-50" />
+            <p className="text-[11px] leading-tight">
+              Type a prompt or capture system
+              <br />
+              audio to ask ChatGPT.
+            </p>
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div
+            key={i}
+            className={cn(
+              "flex gap-1.5",
+              m.role === "user" ? "flex-row-reverse" : "flex-row"
+            )}
+          >
+            <div
+              className={cn(
+                "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full",
+                m.role === "user"
+                  ? "bg-primary/20 text-primary"
+                  : "bg-accent text-accent-foreground"
+              )}
+            >
+              {m.role === "user" ? (
+                <User className="size-2.5" />
+              ) : (
+                <Sparkles className="size-2.5" />
+              )}
+            </div>
+            <div
+              className={cn(
+                "max-w-[85%] whitespace-pre-wrap rounded-md px-2 py-1 text-xs leading-snug select-text",
+                m.role === "user"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-secondary text-secondary-foreground"
+              )}
+            >
+              {m.content}
+            </div>
+          </div>
+        ))}
+        {busy && (
+          <div className="flex items-center gap-1.5 text-muted-foreground">
+            <div className="flex size-4 items-center justify-center rounded-full bg-accent">
+              <Sparkles className="size-2.5" />
+            </div>
+            <Loader2 className="size-3.5 animate-spin" />
+          </div>
+        )}
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
 
+      {/* Status */}
+      {status && (
+        <div className="shrink-0 border-t border-border bg-card/50 px-2 py-1 text-[10px] text-muted-foreground">
+          {status}
+        </div>
+      )}
+
+      {/* Composer */}
       <form
-        className="row"
+        className="flex shrink-0 items-end gap-1.5 border-t border-border p-2"
         onSubmit={(e) => {
           e.preventDefault();
-          greet();
+          send(input);
         }}
       >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
+        <Button
+          type="button"
+          size="icon"
+          variant={recording ? "destructive" : "secondary"}
+          title={recording ? "Stop capture" : "Capture system audio"}
+          className="shrink-0"
+          onClick={toggleRecording}
+        >
+          {recording ? <Square className="fill-current" /> : <Mic />}
+        </Button>
+        <Textarea
+          value={input}
+          placeholder="Ask ChatGPT…"
+          rows={1}
+          className="max-h-24 min-h-7 flex-1 select-text"
+          onChange={(e) => setInput(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send(input);
+            }
+          }}
         />
-        <button type="submit">Greet</button>
+        <Button
+          type="submit"
+          size="icon"
+          className="shrink-0"
+          disabled={busy || !input.trim()}
+        >
+          {busy ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
+        </Button>
       </form>
-      <p>{greetMsg}</p>
-    </main>
+    </div>
   );
 }
 
