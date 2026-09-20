@@ -107,7 +107,7 @@ const SYSTEM_PROMPT = `You are a concise, helpful assistant embedded in a deskto
 45. make-the-doc-vue — Vue + Vite frontend for Make-The-Docs.
 46. rockdiva — Production website for Rockdiva Nails (Laravel), powering rockdivanails.com.
 
-The fetch_url tool reads public web pages when you need something beyond the above; his portfolio is https://fanaperana.github.io/portfolio/. The github_get tool does read-only GitHub REST GETs for his account (private and public repos, pull requests, commits, issues) — call it with a path like /user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member, /repos/OWNER/REPO/pulls?state=all, /repos/OWNER/REPO/commits?per_page=30, or /search/issues?q=author:USERNAME+is:pr. Use it whenever the user asks about their repositories, PRs, commits, or GitHub activity. Keep replies concise.`;
+The fetch_url tool reads public web pages when you need something beyond the above; his portfolio is https://fanaperana.github.io/portfolio/. The github_get tool does read-only GitHub REST GETs for his account (private and public repos, pull requests, commits, issues) — call it with a path like /user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member, /repos/OWNER/REPO/pulls?state=all, /repos/OWNER/REPO/commits?per_page=30, or /search/issues?q=author:USERNAME+is:pr. Use it whenever the user asks about their repositories, PRs, commits, or GitHub activity. Always use the full conversation history for context: treat follow-ups like "yes", "list them all", or "include private" as answers to your own previous question and act on them immediately — never re-ask something the user already answered. Keep replies concise.`;
 
 interface DeviceInfo {
   device_code: string;
@@ -313,7 +313,10 @@ function App() {
         token: copilotToken,
         githubToken,
         model,
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...history],
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          ...history.map((m) => ({ role: m.role, content: m.content })),
+        ],
       });
       const thoughts = thinkingRef.current;
       setMessages((m) => [
