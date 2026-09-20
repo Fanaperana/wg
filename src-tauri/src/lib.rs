@@ -6,7 +6,23 @@ use std::path::PathBuf;
 use copilot::{CopilotState, DeviceInfo};
 use serde_json::Value;
 use stt::SttState;
-use tauri::{Manager, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, State,
+};
+
+/// Show the widget if hidden, hide it if visible.
+fn toggle_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
 
 /// Start the GitHub device-login flow for Copilot.
 #[tauri::command]
@@ -91,6 +107,31 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_content_protected(true);
             }
+            // Tray icon: the app is hidden from the taskbar, so this is the way to reach it.
+            let show = MenuItem::with_id(app, "show", "Show / Hide", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("wg")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => toggle_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        toggle_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
