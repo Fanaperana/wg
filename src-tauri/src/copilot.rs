@@ -179,13 +179,16 @@ pub async fn chat(
     }]);
 
     // Bounded tool loop: let the model call fetch_url a few times, feeding each
-    // result back, then return its final text answer.
-    for _ in 0..4 {
-        let body = serde_json::json!({
-            "model": model,
-            "messages": conversation,
-            "tools": tools,
-        });
+    // result back, then return its final text answer. Some models (e.g. Claude
+    // or Gemini via Copilot) may reject the `tools` field — fall back to a
+    // plain request in that case so every model still works.
+    let mut use_tools = true;
+    for _ in 0..5 {
+        let body = if use_tools {
+            serde_json::json!({ "model": model, "messages": conversation, "tools": tools })
+        } else {
+            serde_json::json!({ "model": model, "messages": conversation })
+        };
 
         let res = client
             .post(CHAT_URL)
@@ -203,6 +206,11 @@ pub async fn chat(
         let json: Value = res.json().await.map_err(|e| e.to_string())?;
 
         if !status.is_success() {
+            // Retry once without tools if the model doesn't accept them.
+            if use_tools && status.as_u16() == 400 {
+                use_tools = false;
+                continue;
+            }
             let msg = json
                 .pointer("/error/message")
                 .and_then(|v| v.as_str())
