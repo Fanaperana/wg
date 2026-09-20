@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,6 +12,7 @@ const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const CHAT_URL: &str = "https://api.githubcopilot.com/chat/completions";
+const RESPONSES_URL: &str = "https://api.githubcopilot.com/responses";
 
 const EDITOR_VERSION: &str = "vscode/1.95.0";
 const PLUGIN_VERSION: &str = "copilot-chat/0.22.0";
@@ -35,6 +37,8 @@ struct CachedToken {
 #[derive(Default)]
 pub struct CopilotState {
     cached: Mutex<Option<CachedToken>>,
+    // model id -> supported API endpoints (e.g. ["/chat/completions", "/responses"]).
+    endpoints: Mutex<HashMap<String, Vec<String>>>,
 }
 
 fn now() -> i64 {
@@ -196,6 +200,7 @@ pub async fn list_models(state: &CopilotState, oauth_token: &str) -> Result<Vec<
     }
 
     let mut ids: Vec<String> = Vec::new();
+    let mut endpoint_map: HashMap<String, Vec<String>> = HashMap::new();
     if let Some(arr) = json.get("data").and_then(|v| v.as_array()) {
         for m in arr {
             // Only chat-capable models; skip embeddings and disabled entries.
@@ -212,18 +217,156 @@ pub async fn list_models(state: &CopilotState, oauth_token: &str) -> Result<Vec<
                 continue;
             }
             if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
+                // Record which API endpoints this model is served on so chat()
+                // can route to /responses when /chat/completions isn't offered.
+                let eps: Vec<String> = m
+                    .get("supported_endpoints")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                endpoint_map.insert(id.to_string(), eps);
                 if !ids.iter().any(|x| x == id) {
                     ids.push(id.to_string());
                 }
             }
         }
     }
+    if let Ok(mut guard) = state.endpoints.lock() {
+        *guard = endpoint_map;
+    }
     Ok(ids)
 }
 
-/// Send a chat completion request through the Copilot API and return the reply
-/// text. The model is given a `fetch_url` tool so it can pull in live web
-/// content (for example the user's portfolio) when it needs current facts.
+/// Decide which Copilot API endpoint a model is served on. Prefers
+/// /chat/completions when available, falls back to /responses (used by newer
+/// models like grok and the gpt-5 codex family), else defaults to completions.
+async fn preferred_endpoint(state: &CopilotState, oauth_token: &str, model: &str) -> &'static str {
+    let mut eps = state
+        .endpoints
+        .lock()
+        .ok()
+        .and_then(|m| m.get(model).cloned())
+        .unwrap_or_default();
+    if eps.is_empty() {
+        // Cache miss (e.g. app just started) — populate it once.
+        let _ = list_models(state, oauth_token).await;
+        eps = state
+            .endpoints
+            .lock()
+            .ok()
+            .and_then(|m| m.get(model).cloned())
+            .unwrap_or_default();
+    }
+    if eps.iter().any(|e| e.contains("chat/completions")) {
+        "completions"
+    } else if eps.iter().any(|e| e.contains("responses")) {
+        "responses"
+    } else {
+        "completions"
+    }
+}
+
+/// Tool definitions shared by both API shapes: (name, description, JSON Schema).
+fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
+    vec![
+        (
+            "fetch_url",
+            "Fetch the readable text of a public web page. Use this whenever you need up-to-date or online information, or to look up details about the user (his portfolio is at https://fanaperana.github.io/portfolio/).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "Absolute http(s) URL to fetch." }
+                },
+                "required": ["url"]
+            }),
+        ),
+        (
+            "github_get",
+            "Read-only GitHub REST API GET for the signed-in user (covers private and public repos, PRs, commits, issues). Provide a path beginning with '/'. To COUNT repositories, call /user and read public_repos, total_private_repos and owned_private_repos (do not paginate). Other examples: /user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member, /repos/OWNER/REPO/pulls?state=all&per_page=50, /repos/OWNER/REPO/commits?per_page=30, /search/issues?q=author:USERNAME+is:pr, /repos/OWNER/REPO/contents/PATH. Returns JSON.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "GitHub API path starting with '/', including any query string." }
+                },
+                "required": ["path"]
+            }),
+        ),
+    ]
+}
+
+/// Tools in Chat Completions shape (`{type, function:{name,...}}`).
+fn tools_chat() -> Value {
+    Value::Array(
+        tool_specs()
+            .into_iter()
+            .map(|(n, d, p)| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": { "name": n, "description": d, "parameters": p }
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Tools in Responses shape (flat `{type, name, ...}`).
+fn tools_responses() -> Value {
+    Value::Array(
+        tool_specs()
+            .into_iter()
+            .map(|(n, d, p)| {
+                serde_json::json!({
+                    "type": "function",
+                    "name": n,
+                    "description": d,
+                    "parameters": p
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Execute one tool call by name and return its textual result, emitting a
+/// "thinking" line describing the action.
+async fn run_tool(
+    app: &tauri::AppHandle,
+    client: &reqwest::Client,
+    gh_token: &str,
+    name: &str,
+    args: &str,
+) -> String {
+    match name {
+        "fetch_url" => {
+            let url = serde_json::from_str::<Value>(args)
+                .ok()
+                .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(String::from));
+            match url {
+                Some(u) => {
+                    let _ = app.emit("copilot-thinking", format!("Fetching {u}"));
+                    fetch_url(client, &u).await
+                }
+                None => "Error: missing 'url' argument.".to_string(),
+            }
+        }
+        "github_get" => {
+            let path = serde_json::from_str::<Value>(args)
+                .ok()
+                .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from));
+            match path {
+                Some(p) => {
+                    let _ = app.emit("copilot-thinking", format!("GitHub GET {p}"));
+                    github_get(client, gh_token, &p).await
+                }
+                None => "Error: missing 'path' argument.".to_string(),
+            }
+        }
+        _ => format!("Error: unknown tool '{name}'."),
+    }
+}
+
+/// Send a chat request through Copilot and return the reply text. Routes to the
+/// correct API for the chosen model: most use /chat/completions, but newer
+/// models (grok, gpt-5 codex family) are only served on /responses.
 pub async fn chat(
     app: &tauri::AppHandle,
     state: &CopilotState,
@@ -233,12 +376,6 @@ pub async fn chat(
     messages: Value,
 ) -> Result<String, String> {
     let token = copilot_token(state, oauth_token).await?;
-    let client = reqwest::Client::new();
-
-    // Emit a line into the live "thinking" stream shown in the UI.
-    let think = |text: String| {
-        let _ = app.emit("copilot-thinking", text);
-    };
 
     // Token used for GitHub REST reads: a dedicated PAT if provided, else the
     // login token (public/user data only).
@@ -248,54 +385,30 @@ pub async fn chat(
         github_token.trim().to_string()
     };
 
+    match preferred_endpoint(state, oauth_token, model).await {
+        "responses" => chat_responses(app, &token, &gh_token, model, messages).await,
+        _ => chat_completions(app, &token, &gh_token, model, messages).await,
+    }
+}
+
+/// Chat via the OpenAI-compatible /chat/completions endpoint.
+async fn chat_completions(
+    app: &tauri::AppHandle,
+    token: &str,
+    gh_token: &str,
+    model: &str,
+    messages: Value,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let think = |text: String| {
+        let _ = app.emit("copilot-thinking", text);
+    };
     let mut conversation: Vec<Value> = messages.as_array().cloned().unwrap_or_default();
+    let tools = tools_chat();
 
-    let tools = serde_json::json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "fetch_url",
-                "description": "Fetch the readable text of a public web page. Use this whenever you need up-to-date or online information, or to look up details about the user (his portfolio is at https://fanaperana.github.io/portfolio/).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {
-                            "type": "string",
-                            "description": "Absolute http(s) URL to fetch."
-                        }
-                    },
-                    "required": ["url"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "github_get",
-                "description": "Read-only GitHub REST API GET for the signed-in user (covers private and public repos, PRs, commits, issues). Provide a path beginning with '/'. To COUNT repositories, call /user and read public_repos, total_private_repos and owned_private_repos (do not paginate). Other examples: /user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member, /repos/OWNER/REPO/pulls?state=all&per_page=50, /repos/OWNER/REPO/commits?per_page=30, /search/issues?q=author:USERNAME+is:pr, /repos/OWNER/REPO/contents/PATH. Returns JSON.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "GitHub API path starting with '/', including any query string."
-                        }
-                    },
-                    "required": ["path"]
-                }
-            }
-        }
-    ]);
-
-    // Bounded tool loop: let the model call tools a number of times, feeding
-    // each result back, then return its final text answer. Some models (e.g.
-    // Claude or Gemini via Copilot) may reject the `tools` field — fall back to
-    // a plain request in that case so every model still works.
     let mut use_tools = true;
     let max_rounds = 12;
     for round in 0..max_rounds {
-        // On the last allowed round, drop tools so the model is forced to
-        // produce a final text answer instead of requesting yet another call.
         let offer_tools = use_tools && round < max_rounds - 1;
         let body = if offer_tools {
             serde_json::json!({ "model": model, "messages": conversation, "tools": tools })
@@ -305,7 +418,7 @@ pub async fn chat(
 
         let res = client
             .post(CHAT_URL)
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .header("Editor-Version", EDITOR_VERSION)
             .header("Editor-Plugin-Version", PLUGIN_VERSION)
             .header("Copilot-Integration-Id", INTEGRATION_ID)
@@ -322,7 +435,6 @@ pub async fn chat(
         let json: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
 
         if !status.is_success() {
-            // Retry once without tools if the model doesn't accept them.
             if offer_tools && status.as_u16() == 400 {
                 use_tools = false;
                 continue;
@@ -339,8 +451,6 @@ pub async fn chat(
             .cloned()
             .ok_or_else(|| "No message in Copilot response".to_string())?;
 
-        // Surface any chain-of-thought / narration the model returned so the UI
-        // can show it, mirroring VS Code's "thinking" panel.
         for key in ["reasoning_content", "reasoning"] {
             if let Some(r) = message.get(key).and_then(|v| v.as_str()) {
                 if !r.trim().is_empty() {
@@ -363,14 +473,12 @@ pub async fn chat(
                 .ok_or_else(|| "No content in Copilot response".to_string());
         }
 
-        // If the model narrated before calling tools, show that too.
         if let Some(c) = message.get("content").and_then(|v| v.as_str()) {
             if !c.trim().is_empty() {
                 think(c.trim().to_string());
             }
         }
 
-        // Record the assistant's tool request, then answer each call.
         conversation.push(message);
         for call in tool_calls {
             let id = call.get("id").and_then(|v| v.as_str()).unwrap_or_default();
@@ -382,37 +490,142 @@ pub async fn chat(
                 .pointer("/function/arguments")
                 .and_then(|v| v.as_str())
                 .unwrap_or("{}");
-
-            let result = if name == "fetch_url" {
-                let url = serde_json::from_str::<Value>(args)
-                    .ok()
-                    .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(String::from));
-                match url {
-                    Some(u) => {
-                        think(format!("Fetching {u}"));
-                        fetch_url(&client, &u).await
-                    }
-                    None => "Error: missing 'url' argument.".to_string(),
-                }
-            } else if name == "github_get" {
-                let path = serde_json::from_str::<Value>(args)
-                    .ok()
-                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from));
-                match path {
-                    Some(p) => {
-                        think(format!("GitHub GET {p}"));
-                        github_get(&client, &gh_token, &p).await
-                    }
-                    None => "Error: missing 'path' argument.".to_string(),
-                }
-            } else {
-                format!("Error: unknown tool '{name}'.")
-            };
-
+            let result = run_tool(app, &client, gh_token, name, args).await;
             conversation.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": id,
                 "content": result,
+            }));
+        }
+    }
+
+    Err("The assistant made too many tool calls without answering.".to_string())
+}
+
+/// Chat via the /responses endpoint (used by grok, gpt-5 codex, etc.).
+async fn chat_responses(
+    app: &tauri::AppHandle,
+    token: &str,
+    gh_token: &str,
+    model: &str,
+    messages: Value,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let think = |text: String| {
+        let _ = app.emit("copilot-thinking", text);
+    };
+    // Responses accepts prior chat messages directly as input items.
+    let mut input: Vec<Value> = messages.as_array().cloned().unwrap_or_default();
+    let tools = tools_responses();
+
+    let mut use_tools = true;
+    let max_rounds = 12;
+    for round in 0..max_rounds {
+        let offer_tools = use_tools && round < max_rounds - 1;
+        let body = if offer_tools {
+            serde_json::json!({ "model": model, "input": input, "tools": tools })
+        } else {
+            serde_json::json!({ "model": model, "input": input })
+        };
+
+        let res = client
+            .post(RESPONSES_URL)
+            .bearer_auth(token)
+            .header("Editor-Version", EDITOR_VERSION)
+            .header("Editor-Plugin-Version", PLUGIN_VERSION)
+            .header("Copilot-Integration-Id", INTEGRATION_ID)
+            .header("Openai-Intent", "conversation-panel")
+            .header("X-Request-Id", request_id())
+            .header("User-Agent", USER_AGENT)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let status = res.status();
+        let raw = res.text().await.map_err(|e| e.to_string())?;
+        let json: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+
+        if !status.is_success() {
+            if offer_tools && status.as_u16() == 400 {
+                use_tools = false;
+                continue;
+            }
+            let msg = json
+                .pointer("/error/message")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| if raw.is_empty() { "Unknown error from Copilot" } else { raw.trim() });
+            return Err(format!("Copilot ({status}): {msg}"));
+        }
+
+        let output = json
+            .get("output")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Surface reasoning summaries as "thinking".
+        let mut calls: Vec<Value> = Vec::new();
+        let mut assembled = String::new();
+        for item in &output {
+            match item.get("type").and_then(|v| v.as_str()) {
+                Some("reasoning") => {
+                    if let Some(sum) = item.get("summary").and_then(|v| v.as_array()) {
+                        for s in sum {
+                            if let Some(t) = s.get("text").and_then(|v| v.as_str()) {
+                                if !t.trim().is_empty() {
+                                    think(t.trim().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                Some("message") => {
+                    if let Some(parts) = item.get("content").and_then(|v| v.as_array()) {
+                        for p in parts {
+                            if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
+                                assembled.push_str(t);
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => calls.push(item.clone()),
+                _ => {}
+            }
+        }
+
+        if calls.is_empty() {
+            let text = json
+                .get("output_text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(assembled);
+            if text.trim().is_empty() {
+                return Err("No content in Copilot response".to_string());
+            }
+            return Ok(text);
+        }
+
+        // Feed the model's own output (incl. reasoning) back, then tool results.
+        for item in &output {
+            input.push(item.clone());
+        }
+        for call in &calls {
+            let call_id = call
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let name = call.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+            let args = call
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
+            let result = run_tool(app, &client, gh_token, name, args).await;
+            input.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": result,
             }));
         }
     }
