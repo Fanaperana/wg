@@ -109,18 +109,9 @@ fn enter_capture(
     let size = win.inner_size().map_err(|e| e.to_string())?;
     *saved.0.lock().unwrap() = Some((pos.x, pos.y, size.width, size.height));
 
-    let monitor = win
-        .primary_monitor()
-        .map_err(|e| e.to_string())?
-        .ok_or("no primary monitor")?;
-    let mpos = monitor.position();
-    let msize = monitor.size();
-    // resizable:false blocks user resizing, not programmatic; toggle to be safe.
-    let _ = win.set_resizable(true);
-    win.set_position(tauri::PhysicalPosition::new(mpos.x, mpos.y))
-        .map_err(|e| e.to_string())?;
-    win.set_size(tauri::PhysicalSize::new(msize.width, msize.height))
-        .map_err(|e| e.to_string())?;
+    // Borderless fullscreen covers the monitor exactly — no DWM/resize-border
+    // offset that manual set_size/set_position leaves behind on Windows.
+    win.set_fullscreen(true).map_err(|e| e.to_string())?;
     let _ = win.show();
     let _ = win.set_focus();
     Ok(frame)
@@ -130,11 +121,11 @@ fn enter_capture(
 #[tauri::command]
 fn exit_capture(app: tauri::AppHandle, saved: State<'_, SavedBounds>) -> Result<(), String> {
     let win = app.get_webview_window("main").ok_or("no main window")?;
+    let _ = win.set_fullscreen(false);
     if let Some((x, y, w, h)) = saved.0.lock().unwrap().take() {
         let _ = win.set_size(tauri::PhysicalSize::new(w, h));
         let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
     }
-    let _ = win.set_resizable(false);
     Ok(())
 }
 
