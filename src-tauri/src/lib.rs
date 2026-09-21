@@ -2,7 +2,7 @@ mod capture;
 mod copilot;
 mod stt;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use copilot::{CopilotState, DeviceInfo};
@@ -144,15 +144,24 @@ fn get_capture_frame(state: State<'_, CaptureState>) -> Option<String> {
     state.0.lock().unwrap().clone()
 }
 
-/// Locate the bundled `models` directory, falling back to the working dir in dev.
+/// Locate the `models` directory that actually contains the speech models.
+///
+/// In a packaged build the models are bundled under the Resource dir. In dev the
+/// Resource dir (`target/debug/models`) exists but is not populated with the
+/// large model files, so we fall back to the crate's own `models` folder.
 fn resolve_models_dir(app: &tauri::App) -> PathBuf {
+    let has_models = |dir: &Path| dir.join("sense-voice").join("model.int8.onnx").exists();
     if let Ok(path) = app
         .path()
         .resolve("models", tauri::path::BaseDirectory::Resource)
     {
-        if path.exists() {
+        if has_models(&path) {
             return path;
         }
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models");
+    if has_models(&dev) {
+        return dev;
     }
     PathBuf::from("models")
 }
@@ -160,6 +169,24 @@ fn resolve_models_dir(app: &tauri::App) -> PathBuf {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                // Full detail for our own code without noisy dependency logs.
+                .level_for("wg_lib", log::LevelFilter::Trace)
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                // Persistent, timestamped log in the app-data log dir
+                // (e.g. %APPDATA%\.wg\logs\wg.log on Windows).
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("wg".into()),
+                    },
+                ))
+                .max_file_size(5_000_000)
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .manage(CopilotState::default())
         .manage(CaptureState::default())

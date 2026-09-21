@@ -211,6 +211,8 @@ function App() {
       listen<string>("stt-status", (e) => {
         if (e.payload === "loading") setStatus("Loading speech model…");
         else if (e.payload === "listening") setStatus("Listening…");
+        else if (e.payload === "no-audio")
+          setStatus("No system audio — play sound on your default output device");
         else if (e.payload === "stopped") {
           if (stopFallbackRef.current) {
             window.clearTimeout(stopFallbackRef.current);

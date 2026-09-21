@@ -7,7 +7,7 @@
 //! A single long-lived worker thread owns the recognizer, the VAD and the
 //! audio stream (all of which are cheap to keep but expensive to reload), and
 //! streams results back to the UI through Tauri events:
-//!   * `stt-status`  — "loading" | "listening" | "stopped"
+//!   * `stt-status`  — "loading" | "listening" | "no-audio" | "stopped"
 //!   * `stt-partial` — interim transcript for the current utterance
 //!   * `stt-final`   — a finished utterance
 //!   * `stt-error`   — a human-readable error string
@@ -30,6 +30,9 @@ use tauri::{AppHandle, Emitter};
 const SAMPLE_RATE: i32 = 16_000;
 /// VAD window size in samples — do not change, the Silero model expects 512.
 const WINDOW: usize = 512;
+/// Amplitude below which captured audio is treated as silence for the
+/// "no system audio" warning.
+const SILENCE_LEVEL: f32 = 0.005;
 
 enum Cmd {
     Start,
@@ -97,11 +100,11 @@ fn worker(app: AppHandle, models_dir: PathBuf, rx: Receiver<Cmd>, recording: Arc
         match outcome {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                eprintln!("[stt] session error: {e}");
+                log::error!("[stt] session error: {e}");
                 let _ = app.emit("stt-error", e);
             }
             Err(_) => {
-                eprintln!("[stt] session panicked; resetting engine");
+                log::error!("[stt] session panicked; resetting engine");
                 // The recognizer/VAD may be in a bad state — force a reload.
                 engine = None;
                 let _ = app.emit("stt-error", "Speech engine hit an error. Try again.");
@@ -172,7 +175,7 @@ fn session(
     let config: cpal::StreamConfig = default_config.into();
     let channels = config.channels as usize;
     let device_rate = config.sample_rate.0 as i32;
-    eprintln!(
+    log::info!(
         "[stt] loopback device='{device_name}' rate={device_rate} channels={channels} format={sample_format:?}"
     );
 
@@ -201,6 +204,10 @@ fn session(
     let mut last_level_log = Instant::now();
     let mut peak_level = 0.0f32;
     let mut got_audio = false;
+    // Track audible system audio so we can warn when the captured loopback is
+    // silent (wrong default output device, or nothing is playing).
+    let mut last_audible = Instant::now();
+    let mut warned_no_audio = false;
 
     while recording.load(Ordering::SeqCst) {
         match rx.recv_timeout(Duration::from_millis(100)) {
@@ -224,13 +231,20 @@ fn session(
                 if a > peak_level {
                     peak_level = a;
                 }
+                if a > SILENCE_LEVEL {
+                    last_audible = Instant::now();
+                    if warned_no_audio {
+                        warned_no_audio = false;
+                        let _ = app.emit("stt-status", "listening");
+                    }
+                }
             }
             vad.accept_waveform(window);
             if vad.detected() {
                 if !in_speech {
                     in_speech = true;
                     utterance.clear();
-                    eprintln!("[stt] speech detected");
+                    log::debug!("[stt] speech detected");
                 }
             }
             if in_speech {
@@ -246,7 +260,7 @@ fn session(
         while !vad.is_empty() {
             if let Some(segment) = vad.front() {
                 let samples = segment.samples();
-                eprintln!("[stt] final segment: {} samples", samples.len());
+                log::debug!("[stt] final segment: {} samples", samples.len());
                 emit_decode(app, recognizer, samples, "stt-final");
             }
             vad.pop();
@@ -263,9 +277,16 @@ fn session(
         }
 
         if last_level_log.elapsed().as_secs_f32() > 2.0 {
-            eprintln!("[stt] peak level over last 2s: {peak_level:.4} (audio flowing: {got_audio})");
+            log::trace!("[stt] peak level over last 2s: {peak_level:.4} (audio flowing: {got_audio})");
             peak_level = 0.0;
             last_level_log = Instant::now();
+        }
+
+        // No audible system audio for a while: tell the user instead of sitting
+        // silently on "Listening…". Clears itself as soon as audio is captured.
+        if !warned_no_audio && !in_speech && last_audible.elapsed().as_secs_f32() > 5.0 {
+            warned_no_audio = true;
+            let _ = app.emit("stt-status", "no-audio");
         }
     }
 
@@ -286,7 +307,7 @@ fn session(
     }
 
     drop(stream);
-    eprintln!("[stt] session ended (audio flowing: {got_audio})");
+    log::info!("[stt] session ended (audio flowing: {got_audio})");
     Ok(())
 }
 
@@ -363,7 +384,7 @@ fn build_stream(
 }
 
 fn on_stream_error(err: cpal::StreamError) {
-    eprintln!("audio stream error: {err}");
+    log::error!("[stt] audio stream error: {err}");
 }
 
 /// Average interleaved frames down to a single mono channel.
