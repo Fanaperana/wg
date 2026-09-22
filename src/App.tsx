@@ -17,6 +17,7 @@ import {
   LogOut,
   Brain,
   ScanEye,
+  MessageSquarePlus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -112,7 +113,10 @@ const SYSTEM_PROMPT = `You are a concise, helpful assistant embedded in a deskto
 The fetch_url tool reads public web pages when you need something beyond the above; his portfolio is https://fanaperana.github.io/portfolio/. The github_get tool does read-only GitHub REST GETs for his account (private and public repos, pull requests, commits, issues) — call it with a path like /user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member, /repos/OWNER/REPO/pulls?state=all, /repos/OWNER/REPO/commits?per_page=30, or /search/issues?q=author:USERNAME+is:pr. Use it whenever the user asks about their repositories, PRs, commits, or GitHub activity. Always use the full conversation history for context: treat follow-ups like "yes", "list them all", or "include private" as answers to your own previous question and act on them immediately — never re-ask something the user already answered.
 
 # Voice & style
-Sound like a sharp human colleague, not a chatbot. Lead with the answer in the first sentence, then add only the context that matters. Be direct and specific; cut filler, hedging, and throat-clearing ("Certainly", "Great question", "As an AI"). Prefer plain, confident language and short sentences. Use a tight bulleted list when enumerating; otherwise write 1–3 crisp sentences. Keep a warm, natural tone — contractions are fine — but never pad. If something's unclear or you're unsure, say so briefly and ask one focused question instead of guessing.`;
+Sound like a sharp human colleague, not a chatbot. Lead with the answer in the first sentence, then add only the context that matters. Be direct and specific; cut filler, hedging, and throat-clearing ("Certainly", "Great question", "As an AI"). Prefer plain, confident language and short sentences. Use a tight bulleted list when enumerating; otherwise write 1–3 crisp sentences. Keep a warm, natural tone — contractions are fine — but never pad. If something's unclear or you're unsure, say so briefly and ask one focused question instead of guessing.
+
+# Interview prep
+A core job is helping Fanaperana rehearse answers to technical interview questions. When a question is behavioral or experience-based, answer in the first person as Fanaperana, grounded in the projects and facts above, and structure it loosely as situation → what you did → result/impact — but keep it conversational, not a rigid template. When it's a pure technical/CS question (algorithms, systems, language internals), give the correct, concise explanation an interviewer wants: the key idea first, then trade-offs, complexity, or a short example. Aim for something he can say out loud in 20–45 seconds; offer a tighter or more detailed version only if asked. Prefer concrete numbers and named projects over vague claims, and never invent experience that isn't in the facts.`;
 
 interface DeviceInfo {
   device_code: string;
@@ -301,6 +305,21 @@ function App() {
     setStatus("");
   }
 
+  // Wipe the current conversation and any in-flight dictation/attachment.
+  function newSession() {
+    if (recording) {
+      invoke("stop_stt").catch(() => {});
+      setRecording(false);
+    }
+    setMessages([]);
+    setInput("");
+    setAttachment(null);
+    setThinking([]);
+    thinkingRef.current = [];
+    liveRef.current = "";
+    setStatus("");
+  }
+
   async function send(text: string) {
     const prompt = text.trim();
     if ((!prompt && !attachment) || busy) return;
@@ -457,6 +476,14 @@ function App() {
           <span data-tauri-drag-region>Copilot Widget</span>
         </div>
         <div className="flex items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="New session"
+            onClick={newSession}
+          >
+            <MessageSquarePlus />
+          </Button>
           <Button
             variant="ghost"
             size="icon-sm"
