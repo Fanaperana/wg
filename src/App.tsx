@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Settings2,
@@ -158,6 +159,8 @@ function App() {
   const [captureFrame, setCaptureFrame] = useState<string | null>(null);
 
   const listRef = useRef<HTMLDivElement>(null);
+  // Wraps the whole widget so the OS window can shrink-wrap its content.
+  const contentRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<number | null>(null);
   const stopFallbackRef = useRef<number | null>(null);
   // Live transcript for the in-progress dictation, plus refs so the (mount-only)
@@ -453,6 +456,27 @@ function App() {
 
   const appWindow = getCurrentWindow();
 
+  // Fixed logical width of the widget; height tracks the rendered content so the
+  // transparent OS window shrink-wraps the bar/panel (no empty click area).
+  const WIDGET_WIDTH = 712;
+  const capturingRef = useRef(false);
+  capturingRef.current = !!captureFrame;
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const apply = () => {
+      // The capture overlay drives the window into fullscreen itself.
+      if (capturingRef.current) return;
+      const h = Math.ceil(el.getBoundingClientRect().height) + 40; // p-5 gutters
+      void appWindow.setSize(new LogicalSize(WIDGET_WIDTH, Math.max(h, 60)));
+    };
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    apply();
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <>
       {captureFrame && (
@@ -462,7 +486,8 @@ function App() {
           onCancel={cancelCapture}
         />
       )}
-      <div className="flex h-screen w-screen flex-col items-center gap-2 overflow-hidden p-3 text-foreground">
+      <div className="flex h-screen w-screen items-start justify-center overflow-hidden p-5 text-foreground">
+       <div ref={contentRef} className="flex h-fit w-full max-w-2xl flex-col gap-2">
         {/* Floating command bar */}
         <form
           data-tauri-drag-region
@@ -470,7 +495,7 @@ function App() {
             e.preventDefault();
             send(input);
           }}
-          className="flex w-full max-w-2xl shrink-0 items-center gap-1 rounded-2xl border border-border bg-background px-2 py-1.5 shadow-2xl shadow-black/40 backdrop-blur-xl"
+          className="flex w-full shrink-0 items-center gap-1 rounded-2xl border border-border bg-background px-2 py-1.5 shadow-2xl shadow-black/40 backdrop-blur-xl"
         >
           <div
             data-tauri-drag-region
@@ -568,7 +593,7 @@ function App() {
           busy ||
           !!status ||
           !!attachment) && (
-          <div className="flex w-full max-w-2xl flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-2xl shadow-black/40 backdrop-blur-xl">
+          <div className="flex w-full flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-2xl shadow-black/40 backdrop-blur-xl">
       {/* Settings */}
       {showSettings && (
         <section className="shrink-0 space-y-2 border-b border-border bg-card/50 p-2">
@@ -665,7 +690,7 @@ function App() {
       )}
 
       {/* Messages */}
-      <div ref={listRef} className="flex-1 space-y-1.5 overflow-y-auto p-2">
+      <div ref={listRef} className="max-h-105 flex-1 space-y-1.5 overflow-y-auto p-2">
         {messages.length === 0 && !showSettings && (
           <div className="flex h-full flex-col items-center justify-center gap-1.5 text-center text-muted-foreground">
             <Sparkles className="size-5 opacity-50" />
@@ -784,6 +809,7 @@ function App() {
       )}
           </div>
         )}
+       </div>
       </div>
     </>
   );
