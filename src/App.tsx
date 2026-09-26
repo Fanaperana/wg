@@ -511,30 +511,9 @@ function App() {
       <div className="pointer-events-none flex h-screen w-screen items-start justify-center p-5 text-foreground">
        <div ref={contentRef} className="pointer-events-auto flex h-fit w-full max-w-2xl flex-col gap-2">
         {/* Floating command bar */}
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            send(input);
-          }}
-          className="flex w-full shrink-0 items-center gap-1 rounded-md border border-border bg-background px-2 py-1.5"
-        >
-          <div className="flex shrink-0 items-center gap-1.5 pl-1 text-primary">
-            <Sparkles className="size-4" />
-          </div>
-          <Textarea
-            value={input}
-            placeholder="Ask Copilot…"
-            rows={1}
-            className="max-h-24 min-h-7 flex-1 cursor-default border-0 bg-transparent px-1 py-1.5 select-text focus-visible:ring-0"
-            onChange={(e) => setInput(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                send(input);
-              }
-            }}
-          />
-          <div className="flex shrink-0 items-center gap-0.5">
+        <div className="flex w-full shrink-0 items-stretch gap-2">
+          {/* Capture & record tools */}
+          <div className="flex shrink-0 items-center gap-0.5 rounded-md border border-border bg-background px-1.5">
             <Button
               type="button"
               size="icon-sm"
@@ -554,56 +533,82 @@ function App() {
             >
               {recording ? <Square className="fill-current" /> : <Mic />}
             </Button>
-            <Button
-              type="submit"
-              size="icon-sm"
-              variant="ghost"
-              title="Send"
-              className="text-primary"
-              disabled={busy || (!input.trim() && !attachment)}
-            >
-              {busy ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
-            </Button>
-            <div className="mx-0.5 h-4 w-px bg-border" />
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="New session"
-              onClick={newSession}
-            >
-              <MessageSquarePlus />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="Settings"
-              onClick={() => setShowSettings((s) => !s)}
-            >
-              <Settings2 />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="Minimize"
-              onClick={() => appWindow.minimize()}
-            >
-              <Minus />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              title="Close"
-              className="hover:bg-destructive hover:text-white"
-              onClick={() => appWindow.close()}
-            >
-              <X />
-            </Button>
           </div>
-        </form>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              send(input);
+            }}
+            className="flex flex-1 items-center gap-1 rounded-md border border-border bg-background px-2 py-1.5"
+          >
+            <div className="flex size-6 shrink-0 items-center justify-center rounded-md bg-linear-to-br from-primary via-primary to-primary/50 text-primary-foreground shadow-sm ring-1 ring-white/10">
+              <Sparkles className="size-3.5" />
+            </div>
+            <Textarea
+              value={input}
+              placeholder="Ask Copilot…"
+              rows={1}
+              className="max-h-24 min-h-7 flex-1 cursor-default border-0 bg-transparent px-1 py-1.5 select-text focus-visible:ring-0"
+              onChange={(e) => setInput(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send(input);
+                }
+              }}
+            />
+            <div className="flex shrink-0 items-center gap-0.5">
+              <Button
+                type="submit"
+                size="icon-sm"
+                variant="ghost"
+                title="Send"
+                className="text-primary"
+                disabled={busy || (!input.trim() && !attachment)}
+              >
+                {busy ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
+              </Button>
+              <div className="mx-0.5 h-4 w-px bg-border" />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title="New session"
+                onClick={newSession}
+              >
+                <MessageSquarePlus />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title="Settings"
+                onClick={() => setShowSettings((s) => !s)}
+              >
+                <Settings2 />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title="Minimize"
+                onClick={() => appWindow.minimize()}
+              >
+                <Minus />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                title="Close"
+                className="hover:bg-destructive hover:text-white"
+                onClick={() => appWindow.close()}
+              >
+                <X />
+              </Button>
+            </div>
+          </form>
+        </div>
 
         {/* Floating panel */}
         {(showSettings ||
