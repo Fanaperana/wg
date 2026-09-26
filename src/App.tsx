@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { LogicalSize } from "@tauri-apps/api/dpi";
+import { getCurrentWindow, cursorPosition } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Settings2,
@@ -456,24 +455,47 @@ function App() {
 
   const appWindow = getCurrentWindow();
 
-  // Fixed logical width of the widget; height tracks the rendered content so the
-  // transparent OS window shrink-wraps the bar/panel (no empty click area).
-  const WIDGET_WIDTH = 712;
+  // Issue #9: the OS window is a full-screen transparent overlay (sized to the
+  // monitor in Rust). A click-through window receives no DOM mouse events, so we
+  // can't use hover to know when to re-enable it — instead we poll the OS cursor
+  // position and only capture input while it's over the widget; everywhere else
+  // clicks fall through to whatever app is behind the overlay.
   const capturingRef = useRef(false);
   capturingRef.current = !!captureFrame;
   useEffect(() => {
-    const el = contentRef.current;
-    if (!el) return;
-    const apply = () => {
-      // The capture overlay drives the window into fullscreen itself.
-      if (capturingRef.current) return;
-      const h = Math.ceil(el.getBoundingClientRect().height) + 40; // p-5 gutters
-      void appWindow.setSize(new LogicalSize(WIDGET_WIDTH, Math.max(h, 60)));
+    let ignoring = true; // matches the initial state set in Rust
+    let raf = 0;
+    let last = 0;
+    const setIgnore = (next: boolean) => {
+      if (next === ignoring) return;
+      ignoring = next;
+      void appWindow.setIgnoreCursorEvents(next);
     };
-    const ro = new ResizeObserver(apply);
-    ro.observe(el);
-    apply();
-    return () => ro.disconnect();
+    const tick = (t: number) => {
+      raf = requestAnimationFrame(tick);
+      if (t - last < 40) return; // ~25 Hz is smooth and cheap
+      last = t;
+      // The region selector needs the whole screen to stay interactive.
+      if (capturingRef.current) {
+        setIgnore(false);
+        return;
+      }
+      const el = contentRef.current;
+      if (!el) return;
+      cursorPosition()
+        .then((p) => {
+          const dpr = window.devicePixelRatio || 1;
+          const x = p.x / dpr - window.screenX;
+          const y = p.y / dpr - window.screenY;
+          const r = el.getBoundingClientRect();
+          const inside =
+            x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+          setIgnore(!inside);
+        })
+        .catch(() => {});
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -486,21 +508,17 @@ function App() {
           onCancel={cancelCapture}
         />
       )}
-      <div className="flex h-screen w-screen items-start justify-center overflow-hidden p-5 text-foreground">
-       <div ref={contentRef} className="flex h-fit w-full max-w-2xl flex-col gap-2">
+      <div className="pointer-events-none flex h-screen w-screen items-start justify-center p-5 text-foreground">
+       <div ref={contentRef} className="pointer-events-auto flex h-fit w-full max-w-2xl flex-col gap-2">
         {/* Floating command bar */}
         <form
-          data-tauri-drag-region
           onSubmit={(e) => {
             e.preventDefault();
             send(input);
           }}
-          className="flex w-full shrink-0 items-center gap-1 rounded-2xl border border-border bg-background px-2 py-1.5 shadow-2xl shadow-black/40 backdrop-blur-xl"
+          className="flex w-full shrink-0 items-center gap-1 rounded-md border border-border bg-background px-2 py-1.5"
         >
-          <div
-            data-tauri-drag-region
-            className="flex shrink-0 items-center gap-1.5 pl-1 text-primary"
-          >
+          <div className="flex shrink-0 items-center gap-1.5 pl-1 text-primary">
             <Sparkles className="size-4" />
           </div>
           <Textarea
@@ -690,7 +708,7 @@ function App() {
       )}
 
       {/* Messages */}
-      <div ref={listRef} className="max-h-105 min-h-0 space-y-1.5 overflow-y-auto p-2">
+      <div ref={listRef} className="max-h-[70vh] min-h-0 space-y-1.5 overflow-y-auto p-2">
         {messages.length === 0 && !showSettings && (
           <div className="flex min-h-28 flex-col items-center justify-center gap-1.5 text-center text-muted-foreground">
             <Sparkles className="size-5 opacity-50" />

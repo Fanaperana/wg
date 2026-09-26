@@ -189,6 +189,15 @@ pub fn run() {
             // Enforce exclusion from screen capture/recording at runtime.
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_content_protected(true);
+                // Issue #9: become a full-screen transparent overlay covering the
+                // monitor, and start click-through so only the widget grabs input.
+                if let Ok(Some(monitor)) = window.current_monitor() {
+                    let p = monitor.position();
+                    let s = monitor.size();
+                    let _ = window.set_position(tauri::PhysicalPosition::new(p.x, p.y));
+                    let _ = window.set_size(tauri::PhysicalSize::new(s.width, s.height));
+                }
+                let _ = window.set_ignore_cursor_events(true);
             }
             // Tray icon: the app is hidden from the taskbar, so this is the way to reach it.
             let show = MenuItem::with_id(app, "show", "Show / Hide", true, None::<&str>)?;
