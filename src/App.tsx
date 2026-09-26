@@ -690,9 +690,9 @@ function App() {
       )}
 
       {/* Messages */}
-      <div ref={listRef} className="max-h-105 flex-1 space-y-1.5 overflow-y-auto p-2">
+      <div ref={listRef} className="max-h-105 min-h-0 space-y-1.5 overflow-y-auto p-2">
         {messages.length === 0 && !showSettings && (
-          <div className="flex h-full flex-col items-center justify-center gap-1.5 text-center text-muted-foreground">
+          <div className="flex min-h-28 flex-col items-center justify-center gap-1.5 text-center text-muted-foreground">
             <Sparkles className="size-5 opacity-50" />
             <p className="text-[11px] leading-tight">
               Type a prompt or capture system
