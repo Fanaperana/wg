@@ -462,56 +462,113 @@ function App() {
           onCancel={cancelCapture}
         />
       )}
-      <div className="flex h-screen flex-col overflow-hidden rounded-lg border border-border bg-background text-foreground backdrop-blur-xl">
-      {/* Title bar */}
-      <header
-        data-tauri-drag-region
-        className="flex h-8 shrink-0 items-center justify-between border-b border-border px-2"
-      >
-        <div
+      <div className="flex h-screen w-screen flex-col items-center gap-2 overflow-hidden p-3 text-foreground">
+        {/* Floating command bar */}
+        <form
           data-tauri-drag-region
-          className="flex items-center gap-1.5 text-xs font-semibold"
+          onSubmit={(e) => {
+            e.preventDefault();
+            send(input);
+          }}
+          className="flex w-full max-w-2xl shrink-0 items-center gap-1 rounded-2xl border border-border bg-background px-2 py-1.5 shadow-2xl shadow-black/40 backdrop-blur-xl"
         >
-          <Sparkles className="size-3.5 text-primary" />
-          <span data-tauri-drag-region>Copilot Widget</span>
-        </div>
-        <div className="flex items-center gap-0.5">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            title="New session"
-            onClick={newSession}
+          <div
+            data-tauri-drag-region
+            className="flex shrink-0 items-center gap-1.5 pl-1 text-primary"
           >
-            <MessageSquarePlus />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            title="Settings"
-            onClick={() => setShowSettings((s) => !s)}
-          >
-            <Settings2 />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            title="Minimize"
-            onClick={() => appWindow.minimize()}
-          >
-            <Minus />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            title="Close"
-            className="hover:bg-destructive hover:text-white"
-            onClick={() => appWindow.close()}
-          >
-            <X />
-          </Button>
-        </div>
-      </header>
+            <Sparkles className="size-4" />
+          </div>
+          <Textarea
+            value={input}
+            placeholder="Ask Copilot…"
+            rows={1}
+            className="max-h-24 min-h-7 flex-1 cursor-default border-0 bg-transparent px-1 py-1.5 select-text focus-visible:ring-0"
+            onChange={(e) => setInput(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send(input);
+              }
+            }}
+          />
+          <div className="flex shrink-0 items-center gap-0.5">
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              title="Capture a screen area"
+              onClick={startCapture}
+            >
+              <ScanEye />
+            </Button>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              title={recording ? "Stop capture" : "Capture system audio"}
+              className={cn(recording && "text-destructive")}
+              onClick={toggleRecording}
+            >
+              {recording ? <Square className="fill-current" /> : <Mic />}
+            </Button>
+            <Button
+              type="submit"
+              size="icon-sm"
+              variant="ghost"
+              title="Send"
+              className="text-primary"
+              disabled={busy || (!input.trim() && !attachment)}
+            >
+              {busy ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
+            </Button>
+            <div className="mx-0.5 h-4 w-px bg-border" />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="New session"
+              onClick={newSession}
+            >
+              <MessageSquarePlus />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="Settings"
+              onClick={() => setShowSettings((s) => !s)}
+            >
+              <Settings2 />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="Minimize"
+              onClick={() => appWindow.minimize()}
+            >
+              <Minus />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              title="Close"
+              className="hover:bg-destructive hover:text-white"
+              onClick={() => appWindow.close()}
+            >
+              <X />
+            </Button>
+          </div>
+        </form>
 
+        {/* Floating panel */}
+        {(showSettings ||
+          messages.length > 0 ||
+          busy ||
+          !!status ||
+          !!attachment) && (
+          <div className="flex w-full max-w-2xl flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-2xl shadow-black/40 backdrop-blur-xl">
       {/* Settings */}
       {showSettings && (
         <section className="shrink-0 space-y-2 border-b border-border bg-card/50 p-2">
@@ -609,7 +666,7 @@ function App() {
 
       {/* Messages */}
       <div ref={listRef} className="flex-1 space-y-1.5 overflow-y-auto p-2">
-        {messages.length === 0 && (
+        {messages.length === 0 && !showSettings && (
           <div className="flex h-full flex-col items-center justify-center gap-1.5 text-center text-muted-foreground">
             <Sparkles className="size-5 opacity-50" />
             <p className="text-[11px] leading-tight">
@@ -700,82 +757,33 @@ function App() {
         )}
       </div>
 
+      {/* Pending attachment */}
+      {attachment && (
+        <div className="relative w-fit shrink-0 border-t border-border p-2">
+          <img
+            src={attachment}
+            alt="pending capture"
+            className="max-h-28 rounded border border-border"
+          />
+          <button
+            type="button"
+            title="Remove"
+            className="absolute top-1 right-1 rounded-full border border-border bg-background p-0.5 text-muted-foreground hover:text-foreground"
+            onClick={() => setAttachment(null)}
+          >
+            <X className="size-3" />
+          </button>
+        </div>
+      )}
+
       {/* Status */}
       {status && (
         <div className="shrink-0 border-t border-border bg-card/50 px-2 py-1 text-[10px] text-muted-foreground">
           {status}
         </div>
       )}
-
-      {/* Composer */}
-      <form
-        className="flex shrink-0 flex-col gap-1.5 border-t border-border p-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          send(input);
-        }}
-      >
-        {attachment && (
-          <div className="relative w-fit">
-            <img
-              src={attachment}
-              alt="pending capture"
-              className="max-h-28 rounded border border-border"
-            />
-            <button
-              type="button"
-              title="Remove"
-              className="absolute -top-1.5 -right-1.5 rounded-full border border-border bg-background p-0.5 text-muted-foreground hover:text-foreground"
-              onClick={() => setAttachment(null)}
-            >
-              <X className="size-3" />
-            </button>
           </div>
         )}
-        <div className="flex items-end gap-1.5">
-          <Button
-            type="button"
-            size="icon"
-            variant="secondary"
-            title="Capture a screen area"
-            className="shrink-0"
-            onClick={startCapture}
-          >
-            <ScanEye />
-          </Button>
-          <Button
-            type="button"
-            size="icon"
-            variant={recording ? "destructive" : "secondary"}
-            title={recording ? "Stop capture" : "Capture system audio"}
-            className="shrink-0"
-            onClick={toggleRecording}
-          >
-            {recording ? <Square className="fill-current" /> : <Mic />}
-          </Button>
-          <Textarea
-            value={input}
-            placeholder="Ask Copilot…"
-            rows={1}
-            className="max-h-24 min-h-7 flex-1 cursor-default select-text"
-            onChange={(e) => setInput(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                send(input);
-              }
-            }}
-          />
-          <Button
-            type="submit"
-            size="icon"
-            className="shrink-0"
-            disabled={busy || (!input.trim() && !attachment)}
-          >
-            {busy ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
-          </Button>
-        </div>
-      </form>
       </div>
     </>
   );
