@@ -541,8 +541,8 @@ function App() {
             }}
             className="flex flex-1 items-center gap-1 rounded-md border border-border bg-background px-2 py-1.5"
           >
-            <div className="flex size-6 shrink-0 items-center justify-center rounded-md bg-linear-to-br from-primary via-primary to-primary/50 text-primary-foreground shadow-sm ring-1 ring-white/10">
-              <Sparkles className="size-3.5" />
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-linear-to-b from-primary to-primary/70 text-primary-foreground shadow-lg shadow-primary/30 ring-1 ring-white/25 ring-inset">
+              <Sparkles className="size-4" strokeWidth={2.5} />
             </div>
             <Textarea
               value={input}
