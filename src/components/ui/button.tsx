@@ -17,10 +17,10 @@ const buttonVariants = cva(
           "border border-border bg-transparent hover:bg-accent hover:text-accent-foreground",
       },
       size: {
-        default: "h-7 px-2.5 [&_svg]:size-3.5",
-        sm: "h-6 px-2 [&_svg]:size-3",
-        icon: "size-7 [&_svg]:size-3.5",
-        "icon-sm": "size-6 [&_svg]:size-3",
+        default: "h-8 px-2 [&_svg]:size-5",
+        sm: "h-7 px-1.5 [&_svg]:size-4",
+        icon: "size-8 [&_svg]:size-4",
+        "icon-sm": "size-7 [&_svg]:size-4",
       },
     },
     defaultVariants: {

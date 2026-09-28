@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, cursorPosition } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
-  Settings2,
+  SlidersHorizontal,
   Minus,
   X,
   Mic,
@@ -16,8 +16,9 @@ import {
   LogIn,
   LogOut,
   Brain,
-  ScanEye,
-  MessageSquarePlus,
+  Aperture,
+  SquareDashedPlus,
+  GripVertical,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -156,6 +157,17 @@ function App() {
   const [attachment, setAttachment] = useState<string | null>(null);
   // Frozen full-screen frame shown while the user drags a capture region.
   const [captureFrame, setCaptureFrame] = useState<string | null>(null);
+  // User-set offset (CSS px) of the floating widget from its default top-center
+  // position, dragged via the grip handle and persisted across sessions.
+  const [pos, setPos] = useState<{ x: number; y: number }>(() => {
+    try {
+      const raw = localStorage.getItem("widget_pos");
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return { x: 0, y: 0 };
+  });
+  const draggingRef = useRef(false);
+  const dragStart = useRef({ x: 0, y: 0, px: 0, py: 0 });
 
   const listRef = useRef<HTMLDivElement>(null);
   // Wraps the whole widget so the OS window can shrink-wrap its content.
@@ -171,6 +183,10 @@ function App() {
 
   inputRef.current = input;
   autoSendRef.current = autoSend;
+
+  useEffect(() => {
+    localStorage.setItem("widget_pos", JSON.stringify(pos));
+  }, [pos]);
 
   useEffect(() => {
     localStorage.setItem("copilot_oauth_token", copilotToken);
@@ -320,6 +336,30 @@ function App() {
     thinkingRef.current = [];
     liveRef.current = "";
     setStatus("");
+  }
+
+  // Drag the floating widget around via the grip handle. Pointer capture keeps
+  // events flowing to the handle even as the cursor leaves it; draggingRef keeps
+  // the click-through overlay capturing input for the duration.
+  function onHandleDown(e: React.PointerEvent) {
+    e.preventDefault();
+    draggingRef.current = true;
+    dragStart.current = { x: e.clientX, y: e.clientY, px: pos.x, py: pos.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+  function onHandleMove(e: React.PointerEvent) {
+    if (!draggingRef.current) return;
+    setPos({
+      x: dragStart.current.px + (e.clientX - dragStart.current.x),
+      y: dragStart.current.py + (e.clientY - dragStart.current.y),
+    });
+  }
+  function onHandleUp(e: React.PointerEvent) {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {}
   }
 
   async function send(text: string) {
@@ -476,7 +516,7 @@ function App() {
       if (t - last < 40) return; // ~25 Hz is smooth and cheap
       last = t;
       // The region selector needs the whole screen to stay interactive.
-      if (capturingRef.current) {
+      if (capturingRef.current || draggingRef.current) {
         setIgnore(false);
         return;
       }
@@ -509,46 +549,68 @@ function App() {
         />
       )}
       <div className="pointer-events-none flex h-screen w-screen items-start justify-center p-5 text-foreground">
-       <div ref={contentRef} className="pointer-events-auto flex h-fit w-full max-w-2xl flex-col gap-2">
+       <div
+         ref={contentRef}
+         style={{ transform: `translate(${pos.x}px, ${pos.y}px)` }}
+         className="pointer-events-auto flex h-fit w-full max-w-2xl flex-col gap-2"
+       >
         {/* Floating command bar */}
-        <div className="flex w-full shrink-0 items-stretch gap-2">
-          {/* Capture & record tools */}
-          <div className="flex shrink-0 items-center gap-0.5 rounded-md border border-border bg-background px-1.5">
+        <div className="flex w-full shrink-0 items-stretch gap-1 rounded-[14px] bg-[#2a2c2f]/90 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.18)] backdrop-blur-xl">
+          <div className="flex shrink-0 items-center rounded-[10px] bg-[#1f2125]/80 px-1.5">
+            <div
+              role="button"
+              aria-label="Move widget"
+              title="Drag to move"
+              onPointerDown={onHandleDown}
+              onPointerMove={onHandleMove}
+              onPointerUp={onHandleUp}
+              className="flex h-7 w-5 cursor-grab touch-none items-center justify-center text-zinc-300 active:cursor-grabbing"
+            >
+              <GripVertical className="size-6" />
+            </div>
+          </div>
+
+          <div className="flex shrink-0 items-center gap-1 rounded-[10px] bg-[#1b1d20]/70 px-1">
             <Button
               type="button"
-              size="icon-sm"
               variant="ghost"
+              size="icon-sm"
               title="Capture a screen area"
+              className="h-7 rounded-xl px-1.5 py-0.5 text-zinc-200 transition-all hover:rounded-sm hover:bg-white/5"
               onClick={startCapture}
             >
-              <ScanEye />
+              <Aperture className="size-2.5" />
             </Button>
             <Button
               type="button"
               size="icon-sm"
               variant="ghost"
               title={recording ? "Stop capture" : "Capture system audio"}
-              className={cn(recording && "text-destructive")}
+              className={cn(
+                "h-7 rounded-xl px-1.5 py-0.5 text-zinc-200 transition-all hover:rounded-sm hover:bg-white/5",
+                recording && "text-red-400"
+              )}
               onClick={toggleRecording}
             >
-              {recording ? <Square className="fill-current" /> : <Mic />}
+              {recording ? <Square className="size-2.5 fill-current" /> : <Mic className="size-2.5" />}
             </Button>
           </div>
+
           <form
             onSubmit={(e) => {
               e.preventDefault();
               send(input);
             }}
-            className="flex flex-1 items-center gap-1 rounded-md border border-border bg-background px-2 py-1.5"
+            className="flex flex-1 items-center gap-1 rounded-[10px] bg-[#1b1d20]/70 px-1.5 py-1"
           >
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-linear-to-b from-primary to-primary/70 text-primary-foreground shadow-lg shadow-primary/30 ring-1 ring-white/25 ring-inset">
-              <Sparkles className="size-4" strokeWidth={2.5} />
+            <div className="flex size-6 shrink-0 items-center justify-center rounded-[7px] bg-[#262a2e] text-zinc-100 ring-1 ring-white/5">
+              <Sparkles className="size-3" strokeWidth={2.5} />
             </div>
             <Textarea
               value={input}
               placeholder="Ask Copilot…"
               rows={1}
-              className="max-h-24 min-h-7 flex-1 cursor-default border-0 bg-transparent px-1 py-1.5 select-text focus-visible:ring-0"
+              className="max-h-24 min-h-6 flex-1 cursor-default border-0 bg-transparent px-1 py-1 text-[11px] select-text focus-visible:ring-0"
               onChange={(e) => setInput(e.currentTarget.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -557,54 +619,57 @@ function App() {
                 }
               }}
             />
-            <div className="flex shrink-0 items-center gap-0.5">
+            <div className="flex shrink-0 items-center gap-1">
               <Button
                 type="submit"
                 size="icon-sm"
                 variant="ghost"
                 title="Send"
-                className="text-primary"
+                className="h-7 rounded-xl px-1.5 py-0.5 text-zinc-100 transition-all hover:rounded-sm hover:bg-white/5 disabled:opacity-35"
                 disabled={busy || (!input.trim() && !attachment)}
               >
-                {busy ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
+                {busy ? <Loader2 className="size-2.5 animate-spin" /> : <SendHorizontal className="size-2.5" />}
               </Button>
-              <div className="mx-0.5 h-4 w-px bg-border" />
+              <div className="mx-0.5 h-3.5 w-px bg-white/10" />
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-sm"
                 title="New session"
+                className="h-7 rounded-xl px-1.5 py-0.5 transition-all hover:rounded-sm hover:bg-white/5"
                 onClick={newSession}
               >
-                <MessageSquarePlus />
+                <SquareDashedPlus className="size-2.5" />
               </Button>
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-sm"
                 title="Settings"
+                className="h-7 rounded-xl px-1.5 py-0.5 transition-all hover:rounded-sm hover:bg-white/5"
                 onClick={() => setShowSettings((s) => !s)}
               >
-                <Settings2 />
+                <SlidersHorizontal className="size-2.5" />
               </Button>
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-sm"
                 title="Minimize"
+                className="h-7 rounded-xl px-1.5 py-0.5 transition-all hover:rounded-sm hover:bg-white/5"
                 onClick={() => appWindow.minimize()}
               >
-                <Minus />
+                <Minus className="size-2.5" />
               </Button>
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                title="Close"
-                className="hover:bg-destructive hover:text-white"
+                title="Quit"
+                className="h-7 rounded-xl px-1.5 py-0.5 transition-all hover:rounded-sm hover:bg-red-500/20 hover:text-red-300"
                 onClick={() => appWindow.close()}
               >
-                <X />
+                <LogOut className="size-2.5" />
               </Button>
             </div>
           </form>
@@ -616,10 +681,10 @@ function App() {
           busy ||
           !!status ||
           !!attachment) && (
-          <div className="flex w-full flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-2xl shadow-black/40 backdrop-blur-xl">
+          <div className="flex w-full flex-col overflow-hidden rounded-2xl border border-white/8 bg-[#2a2c2f]/90 shadow-[0_12px_30px_rgba(0,0,0,0.35)] backdrop-blur-xl">
       {/* Settings */}
       {showSettings && (
-        <section className="shrink-0 space-y-2 border-b border-border bg-card/50 p-2">
+        <section className="shrink-0 space-y-2 border-b border-white/8 bg-[#1b1d20]/50 p-2">
           <div className="space-y-1">
             <Label>GitHub Copilot</Label>
             {copilotToken ? (
@@ -715,7 +780,7 @@ function App() {
       {/* Messages */}
       <div ref={listRef} className="max-h-[70vh] min-h-0 space-y-1.5 overflow-y-auto p-2">
         {messages.length === 0 && !showSettings && (
-          <div className="flex min-h-28 flex-col items-center justify-center gap-1.5 text-center text-muted-foreground">
+          <div className="flex min-h-28 flex-col items-center justify-center gap-1.5 text-center text-zinc-400">
             <Sparkles className="size-5 opacity-50" />
             <p className="text-[11px] leading-tight">
               Type a prompt or capture system
@@ -734,10 +799,10 @@ function App() {
           >
             <div
               className={cn(
-                "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full",
+                "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-md",
                 m.role === "user"
-                  ? "bg-primary/20 text-primary"
-                  : "bg-accent text-accent-foreground"
+                  ? "bg-white/10 text-zinc-200"
+                  : "bg-[#262a2e] text-zinc-200"
               )}
             >
               {m.role === "user" ? (
@@ -750,18 +815,18 @@ function App() {
               className={cn(
                 "max-w-[85%] whitespace-pre-wrap rounded-md px-2 py-1 text-xs leading-snug cursor-default select-text",
                 m.role === "user"
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-secondary text-secondary-foreground"
+                  ? "bg-white/10 text-zinc-50"
+                  : "bg-[#1b1d20]/70 text-zinc-200"
               )}
             >
               {m.thinking && m.thinking.length > 0 && (
-                <details className="mb-1 rounded border border-border/60 bg-background/40 px-1.5 py-0.5">
-                  <summary className="flex cursor-pointer items-center gap-1 text-[10px] text-muted-foreground select-none">
+                <details className="mb-1 rounded-lg border border-white/8 bg-[#1b1d20]/60 px-1.5 py-0.5">
+                  <summary className="flex cursor-pointer items-center gap-1 text-[10px] text-zinc-400 select-none">
                     <Brain className="size-2.5" />
                     Thought for {m.thinking.length} step
                     {m.thinking.length > 1 ? "s" : ""}
                   </summary>
-                  <div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground">
+                  <div className="mt-1 space-y-0.5 text-[10px] text-zinc-400">
                     {m.thinking.map((t, j) => (
                       <div key={j} className="whitespace-pre-wrap">
                         {t}
@@ -774,7 +839,7 @@ function App() {
                 <img
                   src={m.image}
                   alt="attachment"
-                  className="mb-1 max-h-40 rounded border border-border/60"
+                  className="mb-1 max-h-40 rounded-md border border-white/8"
                 />
               )}
               {m.content}
@@ -782,13 +847,13 @@ function App() {
           </div>
         ))}
         {busy && (
-          <div className="flex items-start gap-1.5 text-muted-foreground">
-            <div className="mt-0.5 flex size-4 items-center justify-center rounded-full bg-accent">
+          <div className="flex items-start gap-1.5 text-zinc-400">
+            <div className="mt-0.5 flex size-4 items-center justify-center rounded-full bg-[#262a2e] text-zinc-200">
               <Sparkles className="size-2.5" />
             </div>
             {thinking.length > 0 ? (
-              <div className="max-w-[85%] rounded-md border border-border/60 bg-background/40 px-2 py-1 text-[10px]">
-                <div className="mb-0.5 flex items-center gap-1 text-muted-foreground">
+              <div className="max-w-[85%] rounded-lg border border-white/8 bg-[#1b1d20]/60 px-2 py-1 text-[10px]">
+                <div className="mb-0.5 flex items-center gap-1 text-zinc-400">
                   <Brain className="size-2.5 animate-pulse" />
                   Thinking…
                 </div>
@@ -807,16 +872,16 @@ function App() {
 
       {/* Pending attachment */}
       {attachment && (
-        <div className="relative w-fit shrink-0 border-t border-border p-2">
+        <div className="relative w-fit shrink-0 border-t border-white/8 p-2">
           <img
             src={attachment}
             alt="pending capture"
-            className="max-h-28 rounded border border-border"
+            className="max-h-28 rounded-md border border-white/8"
           />
           <button
             type="button"
             title="Remove"
-            className="absolute top-1 right-1 rounded-full border border-border bg-background p-0.5 text-muted-foreground hover:text-foreground"
+            className="absolute top-1 right-1 rounded-full border border-white/8 bg-[#1b1d20] p-0.5 text-zinc-400 hover:text-zinc-100"
             onClick={() => setAttachment(null)}
           >
             <X className="size-3" />
@@ -826,7 +891,7 @@ function App() {
 
       {/* Status */}
       {status && (
-        <div className="shrink-0 border-t border-border bg-card/50 px-2 py-1 text-[10px] text-muted-foreground">
+        <div className="shrink-0 border-t border-white/8 bg-[#1b1d20]/50 px-2 py-1 text-[10px] text-zinc-400">
           {status}
         </div>
       )}
