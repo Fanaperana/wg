@@ -33,6 +33,93 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+// Compact, theme-matched markdown styling for assistant replies.
+const mdComponents: Components = {
+  p: ({ node, ...props }) => <p className="my-1 leading-snug" {...props} />,
+  a: ({ node, ...props }) => (
+    <a
+      className="text-sky-300 underline underline-offset-2"
+      target="_blank"
+      rel="noreferrer"
+      {...props}
+    />
+  ),
+  ul: ({ node, ...props }) => (
+    <ul className="my-1 ml-4 list-disc space-y-0.5" {...props} />
+  ),
+  ol: ({ node, ...props }) => (
+    <ol className="my-1 ml-4 list-decimal space-y-0.5" {...props} />
+  ),
+  li: ({ node, ...props }) => <li className="leading-snug" {...props} />,
+  h1: ({ node, ...props }) => (
+    <h1 className="mt-1.5 mb-1 text-sm font-semibold text-zinc-100" {...props} />
+  ),
+  h2: ({ node, ...props }) => (
+    <h2 className="mt-1.5 mb-1 text-[13px] font-semibold text-zinc-100" {...props} />
+  ),
+  h3: ({ node, ...props }) => (
+    <h3 className="mt-1.5 mb-1 text-xs font-semibold text-zinc-100" {...props} />
+  ),
+  strong: ({ node, ...props }) => (
+    <strong className="font-semibold text-zinc-100" {...props} />
+  ),
+  em: ({ node, ...props }) => <em className="italic" {...props} />,
+  blockquote: ({ node, ...props }) => (
+    <blockquote
+      className="my-1 border-l-2 border-white/15 pl-2 text-zinc-400"
+      {...props}
+    />
+  ),
+  hr: () => <hr className="my-1.5 border-white/10" />,
+  pre: ({ node, ...props }) => (
+    <pre
+      className="my-1 overflow-x-auto rounded-md border border-white/8 bg-black/40 p-2 text-[11px] leading-snug"
+      {...props}
+    />
+  ),
+  code: ({ node, className, children, ...props }) => {
+    const isBlock = /language-/.test(className ?? "");
+    return isBlock ? (
+      <code className={className} {...props}>
+        {children}
+      </code>
+    ) : (
+      <code
+        className="rounded bg-white/10 px-1 py-0.5 text-[11px] text-zinc-100"
+        {...props}
+      >
+        {children}
+      </code>
+    );
+  },
+  table: ({ node, ...props }) => (
+    <div className="my-1 overflow-x-auto">
+      <table className="w-full border-collapse text-[11px]" {...props} />
+    </div>
+  ),
+  th: ({ node, ...props }) => (
+    <th
+      className="border border-white/10 px-1.5 py-0.5 text-left font-semibold"
+      {...props}
+    />
+  ),
+  td: ({ node, ...props }) => (
+    <td className="border border-white/10 px-1.5 py-0.5" {...props} />
+  ),
+};
+
+function Markdown({ children }: { children: string }) {
+  return (
+    <div className="whitespace-normal [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+        {children}
+      </ReactMarkdown>
+    </div>
+  );
+}
 
 type Role = "user" | "assistant" | "system";
 interface Message {
@@ -898,7 +985,11 @@ function App() {
                   className="mb-1 max-h-40 rounded-md border border-white/8"
                 />
               )}
-              {m.content}
+              {m.role === "assistant" ? (
+                <Markdown>{m.content}</Markdown>
+              ) : (
+                m.content
+              )}
             </div>
           </div>
         ))}
