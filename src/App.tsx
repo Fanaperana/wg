@@ -692,35 +692,53 @@ function App() {
           <div className="flex w-full flex-col overflow-hidden rounded-2xl border border-white/8 bg-[#2a2c2f]/90 shadow-[0_12px_30px_rgba(0,0,0,0.35)] backdrop-blur-xl">
       {/* Settings */}
       {showSettings && (
-        <section className="shrink-0 space-y-2 border-b border-white/8 bg-[#1b1d20]/50 p-2">
-          <div className="space-y-1">
-            <Label>GitHub Copilot</Label>
+        <section className="shrink-0 space-y-1.5 border-b border-white/8 bg-[#1b1d20]/50 px-2 py-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold tracking-tight text-zinc-100">
+              Settings
+            </span>
+            <span className="rounded-full bg-white/5 px-1.5 py-0.5 text-[9px] text-zinc-400">
+              {model}
+            </span>
+          </div>
+
+          {/* Account */}
+          <div className="space-y-1 rounded-lg border border-white/8 bg-[#232529]/60 px-2 py-1.5">
+            <Label className="text-[10px] font-medium tracking-wide text-zinc-400 uppercase">
+              GitHub Copilot
+            </Label>
             {copilotToken ? (
-              <div className="flex items-center justify-between gap-2 rounded-md bg-secondary px-2 py-1.5 text-[11px]">
-                <span className="flex items-center gap-1.5 text-secondary-foreground">
-                  <LogIn className="size-3.5" /> Signed in
+              <div className="flex items-center justify-between gap-2 rounded-md border border-white/8 bg-white/5 px-2 py-1 text-[11px]">
+                <span className="flex items-center gap-1.5 text-zinc-200">
+                  <span className="size-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px] shadow-emerald-400/50" />
+                  Signed in
                 </span>
-                <Button variant="ghost" size="sm" onClick={signOut}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-zinc-300 hover:bg-white/5"
+                  onClick={signOut}
+                >
                   <LogOut className="size-3.5" /> Sign out
                 </Button>
               </div>
             ) : login ? (
-              <div className="space-y-1 rounded-md bg-secondary px-2 py-1.5 text-[11px] text-secondary-foreground">
+              <div className="space-y-1 rounded-md border border-white/8 bg-white/5 px-2 py-1 text-[11px] text-zinc-300">
                 <p>
                   Enter this code at{" "}
                   <button
                     type="button"
-                    className="underline"
+                    className="text-zinc-100 underline underline-offset-2"
                     onClick={() => openUrl(login.uri)}
                   >
                     github.com/login/device
                   </button>
                   :
                 </p>
-                <p className="text-center text-base font-bold tracking-widest select-text">
+                <p className="text-center text-base font-bold tracking-widest text-zinc-50 select-text">
                   {login.userCode}
                 </p>
-                <p className="flex items-center gap-1 text-muted-foreground">
+                <p className="flex items-center gap-1 text-zinc-400">
                   <Loader2 className="size-3 animate-spin" /> Waiting for
                   authorization…
                 </p>
@@ -736,9 +754,13 @@ function App() {
               </Button>
             )}
           </div>
-          <div className="flex items-end gap-2">
-            <div className="flex-1 space-y-1">
-              <Label>Model</Label>
+
+          {/* Model + voice/opacity: two cards in one row */}
+          <div className="grid grid-cols-2 gap-1.5">
+            <div className="space-y-1 rounded-lg border border-white/8 bg-[#232529]/60 px-2 py-1.5">
+              <Label className="text-[10px] font-medium tracking-wide text-zinc-400 uppercase">
+                Model
+              </Label>
               <Select value={model} onValueChange={setModel}>
                 <SelectTrigger>
                   <SelectValue />
@@ -752,30 +774,39 @@ function App() {
                 </SelectContent>
               </Select>
             </div>
-            <label className="flex h-7 items-center gap-1.5 text-[11px] text-muted-foreground">
-              <Switch checked={autoSend} onCheckedChange={setAutoSend} />
-              Auto-send voice
-            </label>
-          </div>
-          <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <Label>Opacity</Label>
-              <span className="text-[10px] text-zinc-400">
-                {Math.round(opacity * 100)}%
-              </span>
+
+            <div className="flex flex-col justify-between gap-1.5 rounded-lg border border-white/8 bg-[#232529]/60 px-2 py-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-zinc-300">Auto-send</span>
+                <Switch checked={autoSend} onCheckedChange={setAutoSend} />
+              </div>
+              <div className="space-y-1 border-t border-white/8 pt-1.5">
+                <div className="flex items-center justify-between">
+                  <Label className="text-[10px] font-medium tracking-wide text-zinc-400 uppercase">
+                    Opacity
+                  </Label>
+                  <span className="tabular-nums text-[10px] text-zinc-400">
+                    {Math.round(opacity * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0.2}
+                  max={1}
+                  step={0.05}
+                  value={opacity}
+                  onChange={(e) => setOpacity(Number(e.target.value))}
+                  className="h-1 w-full cursor-pointer appearance-none rounded-full bg-white/15 accent-zinc-200"
+                />
+              </div>
             </div>
-            <input
-              type="range"
-              min={0.2}
-              max={1}
-              step={0.05}
-              value={opacity}
-              onChange={(e) => setOpacity(Number(e.target.value))}
-              className="h-1 w-full cursor-pointer appearance-none rounded-full bg-white/15 accent-zinc-300"
-            />
           </div>
-          <div className="space-y-1">
-            <Label>GitHub token (read-only)</Label>
+
+          {/* GitHub token */}
+          <div className="space-y-1 rounded-lg border border-white/8 bg-[#232529]/60 px-2 py-1.5">
+            <Label className="text-[10px] font-medium tracking-wide text-zinc-400 uppercase">
+              GitHub token (read-only)
+            </Label>
             <Input
               type="password"
               placeholder="ghp_… — for reading your repos, PRs, commits"
@@ -783,11 +814,11 @@ function App() {
               onChange={(e) => setGithubToken(e.target.value)}
               autoComplete="off"
             />
-            <p className="text-[10px] text-muted-foreground">
+            <p className="text-[10px] text-zinc-500">
               Optional. Create a token with read-only repo access at{" "}
               <button
                 type="button"
-                className="underline"
+                className="text-zinc-300 underline underline-offset-2"
                 onClick={() =>
                   openUrl(
                     "https://github.com/settings/tokens/new?scopes=repo,read:org&description=wg%20read-only"
