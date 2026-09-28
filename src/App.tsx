@@ -168,6 +168,11 @@ function App() {
   });
   const draggingRef = useRef(false);
   const dragStart = useRef({ x: 0, y: 0, px: 0, py: 0 });
+  // Global widget opacity (0.2–1), adjustable in Settings and persisted.
+  const [opacity, setOpacity] = useState(() => {
+    const n = Number(localStorage.getItem("widget_opacity"));
+    return Number.isFinite(n) && n > 0 ? Math.min(1, Math.max(0.2, n)) : 1;
+  });
 
   const listRef = useRef<HTMLDivElement>(null);
   // Wraps the whole widget so the OS window can shrink-wrap its content.
@@ -212,6 +217,9 @@ function App() {
   useEffect(() => {
     localStorage.setItem("auto_send", String(autoSend));
   }, [autoSend]);
+  useEffect(() => {
+    localStorage.setItem("widget_opacity", String(opacity));
+  }, [opacity]);
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [messages, busy]);
@@ -551,7 +559,7 @@ function App() {
       <div className="pointer-events-none flex h-screen w-screen items-start justify-center p-5 text-foreground">
        <div
          ref={contentRef}
-         style={{ transform: `translate(${pos.x}px, ${pos.y}px)` }}
+         style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, opacity }}
          className="pointer-events-auto flex h-fit w-full max-w-2xl flex-col gap-2"
        >
         {/* Floating command bar */}
@@ -748,6 +756,23 @@ function App() {
               <Switch checked={autoSend} onCheckedChange={setAutoSend} />
               Auto-send voice
             </label>
+          </div>
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label>Opacity</Label>
+              <span className="text-[10px] text-zinc-400">
+                {Math.round(opacity * 100)}%
+              </span>
+            </div>
+            <input
+              type="range"
+              min={0.2}
+              max={1}
+              step={0.05}
+              value={opacity}
+              onChange={(e) => setOpacity(Number(e.target.value))}
+              className="h-1 w-full cursor-pointer appearance-none rounded-full bg-white/15 accent-zinc-300"
+            />
           </div>
           <div className="space-y-1">
             <Label>GitHub token (read-only)</Label>
