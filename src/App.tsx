@@ -601,6 +601,25 @@ function App() {
     let ignoring = true; // matches the initial state set in Rust
     let raf = 0;
     let last = 0;
+    // Cache the window's physical origin and scale factor. `window.screenX` and
+    // `devicePixelRatio` are unreliable on macOS (retina + coordinate origin),
+    // so we work entirely in physical pixels using Tauri's own APIs instead.
+    let winX = 0;
+    let winY = 0;
+    let scale = 1;
+    const refreshBounds = async () => {
+      try {
+        const pos = await appWindow.outerPosition();
+        scale = await appWindow.scaleFactor();
+        winX = pos.x;
+        winY = pos.y;
+      } catch {
+        /* window not ready yet */
+      }
+    };
+    void refreshBounds();
+    const moved = appWindow.onMoved(() => void refreshBounds());
+    const resized = appWindow.onResized(() => void refreshBounds());
     const setIgnore = (next: boolean) => {
       if (next === ignoring) return;
       ignoring = next;
@@ -619,18 +638,25 @@ function App() {
       if (!el) return;
       cursorPosition()
         .then((p) => {
-          const dpr = window.devicePixelRatio || 1;
-          const x = p.x / dpr - window.screenX;
-          const y = p.y / dpr - window.screenY;
+          // Map the widget rect (logical, viewport-relative) into the global
+          // physical coordinate space the cursor is reported in.
           const r = el.getBoundingClientRect();
+          const left = winX + r.left * scale;
+          const right = winX + r.right * scale;
+          const top = winY + r.top * scale;
+          const bottom = winY + r.bottom * scale;
           const inside =
-            x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+            p.x >= left && p.x <= right && p.y >= top && p.y <= bottom;
           setIgnore(!inside);
         })
         .catch(() => {});
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      void moved.then((f) => f());
+      void resized.then((f) => f());
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
