@@ -685,7 +685,7 @@ function App() {
               onPointerDown={onHandleDown}
               onPointerMove={onHandleMove}
               onPointerUp={onHandleUp}
-              className="flex h-7 w-5 cursor-grab touch-none items-center justify-center text-zinc-300 active:cursor-grabbing"
+              className="flex h-7 w-5 cursor-default touch-none items-center justify-center text-zinc-300"
             >
               <GripVertical className="size-6" />
             </div>
