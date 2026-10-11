@@ -336,7 +336,7 @@ prerequisites (WebView2 on Windows). Place the speech models under `models/`.
 # install JS deps
 pnpm install
 
-# run in dev (Vite on http://localhost:1420 + Rust hot-rebuild)
+# run in dev (Vite on http://localhost:1430 + Rust hot-rebuild)
 pnpm tauri dev
 
 # production build
